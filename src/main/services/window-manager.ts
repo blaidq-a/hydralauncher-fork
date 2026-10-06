@@ -35,6 +35,7 @@ import { orderBy } from "lodash-es";
 import path from "node:path";
 import UserAgent from "user-agents";
 import { HydraApi } from "./hydra-api";
+import { resolveHydraAuthUrl } from "./hydra-api-url";
 import { logger } from "./logger";
 import {
   addSteamGridDbCacheControl,
@@ -647,23 +648,50 @@ export class WindowManager {
     contents: Electron.WebContents,
     closeWindow: () => void
   ) {
-    contents.on("will-navigate", (_event, url) => {
+    const handleUrl = (url: string) => {
       if (url.startsWith("hydralauncher://auth")) {
         closeWindow();
-
-        HydraApi.handleExternalAuth(url);
-        return;
+        void HydraApi.handleExternalAuth(url).catch((error) => {
+          logger.error("Failed to handle auth from navigation", error);
+        });
+        return true;
       }
 
       if (url.startsWith("hydralauncher://update-account")) {
         closeWindow();
-
         WindowManager.sendToAppWindows("on-account-updated");
+        return true;
       }
+
+      return false;
+    };
+
+    contents.on("will-navigate", (event, url) => {
+      if (handleUrl(url)) {
+        event.preventDefault();
+      }
+    });
+
+    contents.on("will-redirect", (event, url) => {
+      if (handleUrl(url)) {
+        event.preventDefault();
+      }
+    });
+
+    contents.setWindowOpenHandler(({ url }) => {
+      if (handleUrl(url)) {
+        return { action: "deny" };
+      }
+      return { action: "allow" };
     });
   }
 
   public static openAuthWindow(page: AuthPage, searchParams: URLSearchParams) {
+    if (this.authWindow && !this.authWindow.isDestroyed()) {
+      this.authWindow.focus();
+      return;
+    }
+
     const parentWindow =
       this.bigPicture && !this.bigPicture.isDestroyed()
         ? this.bigPicture
@@ -671,7 +699,11 @@ export class WindowManager {
 
     if (!parentWindow || parentWindow.isDestroyed()) return;
 
-    const authUrl = `${import.meta.env.MAIN_VITE_AUTH_URL}${page}?${searchParams.toString()}`;
+    const baseAuthUrl = resolveHydraAuthUrl(
+      import.meta.env.MAIN_VITE_AUTH_URL
+    );
+    const queryString = searchParams.toString();
+    const authUrl = `${baseAuthUrl}${page}${queryString ? `?${queryString}` : ""}`;
 
     if (process.platform === "linux") {
       this.openLinuxAuthWindow(parentWindow, authUrl);
@@ -695,17 +727,22 @@ export class WindowManager {
       },
     });
 
+    this.authWindow = authWindow;
+
     authWindow.removeMenu();
 
     if (!app.isPackaged) authWindow.webContents.openDevTools();
 
-    authWindow.loadURL(authUrl);
+    authWindow.loadURL(authUrl).catch((error) => {
+      logger.error("Failed to load auth URL", authUrl, error);
+    });
 
     authWindow.once("ready-to-show", () => {
       authWindow.show();
     });
 
     authWindow.once("closed", () => {
+      this.authWindow = null;
       if (!parentWindow.isDestroyed()) {
         parentWindow.focus();
       }

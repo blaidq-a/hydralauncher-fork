@@ -12,6 +12,13 @@ import { scopeBigPictureCss } from "./src/big-picture/vite-scope-big-picture-css
 export default defineConfig(({ mode }) => {
   loadEnv(mode);
 
+  process.env.MAIN_VITE_API_URL =
+    process.env.MAIN_VITE_API_URL || "https://hydra-api-us-east-1.losbroxas.org";
+  process.env.MAIN_VITE_AUTH_URL =
+    process.env.MAIN_VITE_AUTH_URL || "https://auth.hydralauncher.gg";
+  process.env.MAIN_VITE_CHECKOUT_URL =
+    process.env.MAIN_VITE_CHECKOUT_URL || "https://checkout.hydralauncher.gg";
+
   return {
     main: {
       build: {

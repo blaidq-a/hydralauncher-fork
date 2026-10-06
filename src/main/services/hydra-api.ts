@@ -1,6 +1,5 @@
 import axios, { AxiosError, AxiosInstance } from "axios";
 import { WindowManager } from "./window-manager";
-import url from "url";
 import { uploadGamesBatch } from "./library-sync";
 import { clearGamesRemoteIds } from "./library-sync/clear-games-remote-id";
 import { networkLogger as logger } from "./logger";
@@ -91,72 +90,85 @@ export class HydraApi {
   }
 
   static async handleExternalAuth(uri: string) {
-    const { payload } = url.parse(uri, true).query;
+    try {
+      const parsedUrl = new URL(uri);
+      const payload = parsedUrl.searchParams.get("payload");
 
-    const decodedBase64 = atob(payload as string);
-    const jsonData = JSON.parse(decodedBase64);
-
-    const { accessToken, expiresIn, refreshToken, workwondersJwt } = jsonData;
-
-    const now = new Date();
-
-    const tokenExpirationTimestamp =
-      now.getTime() +
-      this.secondsToMilliseconds(expiresIn) -
-      this.EXPIRATION_OFFSET_IN_MS;
-
-    await clearGamesRemoteIds();
-
-    this.userAuth = {
-      authToken: accessToken,
-      refreshToken: refreshToken,
-      expirationTimestamp: tokenExpirationTimestamp,
-      subscription: null,
-    };
-
-    const { AchievementWatcherManager } = await import(
-      "./achievements/achievement-watcher-manager"
-    );
-    AchievementWatcherManager.resetSessionState();
-
-    logger.log(
-      "Sign in received. Token expiration timestamp:",
-      tokenExpirationTimestamp
-    );
-
-    db.put<string, Auth>(
-      levelKeys.auth,
-      {
-        accessToken,
-        refreshToken,
-        tokenExpirationTimestamp,
-        workwondersJwt,
-      },
-      { valueEncoding: "json" }
-    );
-
-    await getUserData().then((userDetails) => {
-      if (userDetails?.subscription) {
-        this.updateUserSubscription({
-          expiresAt: userDetails.subscription.expiresAt
-            ? new Date(userDetails.subscription.expiresAt)
-            : null,
-        });
+      if (!payload) {
+        logger.error("No payload found in auth URI", uri);
+        return;
       }
-    });
 
-    const { groupedSouvenirWorker } = await import(
-      "./achievements/grouped-souvenir-worker"
-    );
-    void groupedSouvenirWorker.trigger();
+      let decodedStr: string;
+      try {
+        decodedStr = Buffer.from(payload, "base64").toString("utf-8");
+      } catch {
+        decodedStr = atob(payload);
+      }
+      const jsonData = JSON.parse(decodedStr);
 
-    const { startSteamSyncOnStartup } = await import(
-      "./steam-integration/steam-startup-sync"
-    );
-    void startSteamSyncOnStartup();
+      const { accessToken, expiresIn, refreshToken, workwondersJwt } = jsonData;
 
-    if (WindowManager.mainWindow) {
-      WindowManager.mainWindow.webContents.send("on-signin");
+      const now = new Date();
+
+      const tokenExpirationTimestamp =
+        now.getTime() +
+        this.secondsToMilliseconds(expiresIn) -
+        this.EXPIRATION_OFFSET_IN_MS;
+
+      await clearGamesRemoteIds();
+
+      this.userAuth = {
+        authToken: accessToken,
+        refreshToken: refreshToken,
+        expirationTimestamp: tokenExpirationTimestamp,
+        subscription: null,
+      };
+
+      const { AchievementWatcherManager } = await import(
+        "./achievements/achievement-watcher-manager"
+      );
+      AchievementWatcherManager.resetSessionState();
+
+      logger.log(
+        "Sign in received. Token expiration timestamp:",
+        tokenExpirationTimestamp
+      );
+
+      db.put<string, Auth>(
+        levelKeys.auth,
+        {
+          accessToken,
+          refreshToken,
+          tokenExpirationTimestamp,
+          workwondersJwt,
+        },
+        { valueEncoding: "json" }
+      );
+
+      await getUserData().then((userDetails) => {
+        if (userDetails?.subscription) {
+          this.updateUserSubscription({
+            expiresAt: userDetails.subscription.expiresAt
+              ? new Date(userDetails.subscription.expiresAt)
+              : null,
+          });
+        }
+      });
+
+      const { groupedSouvenirWorker } = await import(
+        "./achievements/grouped-souvenir-worker"
+      );
+      void groupedSouvenirWorker.trigger();
+
+      const { startSteamSyncOnStartup } = await import(
+        "./steam-integration/steam-startup-sync"
+      );
+      void startSteamSyncOnStartup();
+
+      WindowManager.closeAuthWindow();
+      WindowManager.sendToAppWindows("on-signin");
+
       void uploadGamesBatch();
 
       SSEClient.close();
@@ -164,6 +176,8 @@ export class HydraApi {
 
       const { syncDownloadSourcesFromApi } = await import("./user");
       syncDownloadSourcesFromApi();
+    } catch (error) {
+      logger.error("Failed to handle external auth", uri, error);
     }
   }
 

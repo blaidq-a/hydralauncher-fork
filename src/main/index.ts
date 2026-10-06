@@ -14,6 +14,7 @@ import {
   logger,
   clearGamesPlaytime,
   WindowManager,
+  HydraApi,
   Lock,
   PowerSaveBlockerManager,
   DownloadOrchestrator,
@@ -63,6 +64,13 @@ i18n.init({
 
 const PROTOCOL = "hydralauncher";
 
+try {
+  const canonicalUserData = path.join(app.getPath("appData"), "hydralauncher");
+  app.setPath("userData", canonicalUserData);
+} catch {
+  // Ignore if appData is not yet available
+}
+
 // Register the custom schemes as privileged so the renderer can fetch them
 // (supportFetchAPI) and use the results on a canvas without tainting it
 // (corsEnabled). Must run before the app is ready.
@@ -88,7 +96,8 @@ if (process.defaultApp) {
 }
 
 const initializeApp = async () => {
-  electronApp.setAppUserModelId("com.hydralauncher.hydra");
+  electronApp.setAppUserModelId("gg.hydralauncher.hydra");
+  app.name = "Hydra";
   refreshPortableShortcutLauncher();
 
   logger.info("Crash dumps directory", app.getPath("crashDumps"));
@@ -338,6 +347,18 @@ const handleDeepLinkPath = (uri?: string) => {
         );
       }
 
+      return;
+    }
+
+    if (url.host === "auth") {
+      void HydraApi.handleExternalAuth(uri).catch((error) => {
+        logger.error("Failed to handle external auth from deep link", error);
+      });
+      return;
+    }
+
+    if (url.host === "update-account") {
+      WindowManager.sendToAppWindows("on-account-updated");
       return;
     }
 

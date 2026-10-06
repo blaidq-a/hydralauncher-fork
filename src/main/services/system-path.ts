@@ -1,4 +1,5 @@
 import { app, dialog } from "electron";
+import path from "node:path";
 import { logger } from "./logger";
 
 export class SystemPath {
@@ -36,6 +37,16 @@ export class SystemPath {
 
   static getPath(pathName: keyof typeof SystemPath.paths): string {
     try {
+      if (pathName === "userData") {
+        try {
+          const appData = app.getPath("appData");
+          if (appData) {
+            return path.join(appData, "hydralauncher");
+          }
+        } catch {
+          // Fall back to default userData if appData is inaccessible
+        }
+      }
       return app.getPath(pathName);
     } catch (error) {
       console.error(`Error getting path: ${error}`);
@@ -43,3 +54,4 @@ export class SystemPath {
     }
   }
 }
+

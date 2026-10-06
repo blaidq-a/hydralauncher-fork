@@ -329,7 +329,10 @@ export function App() {
 
     setupWorkWonders(userDetails?.workwondersJwt, userPreferences?.language);
 
-    if (!document.getElementById("external-resources")) {
+    if (
+      import.meta.env.RENDERER_VITE_EXTERNAL_RESOURCES_URL &&
+      !document.getElementById("external-resources")
+    ) {
       const $script = document.createElement("script");
       $script.id = "external-resources";
       $script.src = `${import.meta.env.RENDERER_VITE_EXTERNAL_RESOURCES_URL}/bundle.js?t=${Date.now()}`;

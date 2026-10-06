@@ -1,6 +1,7 @@
 import { shell } from "electron";
 import { registerEvent } from "../register-event";
 import { HydraApi } from "@main/services";
+import { resolveHydraCheckoutUrl } from "@main/services/hydra-api-url";
 import { db, levelKeys } from "@main/level";
 import type { Auth, OpenCheckoutOptions } from "@types";
 
@@ -25,7 +26,9 @@ const openCheckout = async (
     refreshToken: auth.refreshToken,
   }).then((response) => response.accessToken);
 
-  const checkoutUrl = new URL(import.meta.env.MAIN_VITE_CHECKOUT_URL);
+  const checkoutUrl = new URL(
+    resolveHydraCheckoutUrl(import.meta.env.MAIN_VITE_CHECKOUT_URL)
+  );
 
   if (options?.path && isAllowedPath(options.path)) {
     checkoutUrl.pathname = options.path;

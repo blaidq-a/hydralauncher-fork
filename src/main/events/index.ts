@@ -1,6 +1,7 @@
 import { appVersion, defaultDownloadsPath, isStaging } from "@main/constants";
 import { ipcMain } from "electron";
 import { ScreenshotService } from "@main/services/screenshot";
+import { resolveHydraCheckoutUrl } from "@main/services/hydra-api-url";
 import {
   cleanupAchievementSouvenirSync,
   getAchievementSouvenirSyncDetails,
@@ -51,5 +52,8 @@ ipcMain.handle("cleanupAchievementSouvenirSync", () =>
   cleanupAchievementSouvenirSync()
 );
 ipcMain.handle("getCloudIframeUrl", () =>
-  new URL("/cloud", import.meta.env.MAIN_VITE_CHECKOUT_URL).toString()
+  new URL(
+    "/cloud",
+    resolveHydraCheckoutUrl(import.meta.env.MAIN_VITE_CHECKOUT_URL)
+  ).toString()
 );
