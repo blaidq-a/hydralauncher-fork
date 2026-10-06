@@ -48,9 +48,10 @@ const isLinuxWayland =
     Boolean(process.env.WAYLAND_DISPLAY));
 const windowIcon =
   process.platform === "win32"
-    ? path.join(
-        app.isPackaged ? process.resourcesPath : app.getAppPath(),
-        app.isPackaged ? "icon.ico" : path.join("build", "icon.ico")
+    ? path.resolve(
+        app.isPackaged 
+          ? path.join(process.resourcesPath, "icon.ico")
+          : path.join(__dirname, "../../build/icon.ico")
       )
     : icon;
 const windowIconAsset =
