@@ -46,6 +46,17 @@ const isLinuxWayland =
   process.platform === "linux" &&
   (process.env.XDG_SESSION_TYPE === "wayland" ||
     Boolean(process.env.WAYLAND_DISPLAY));
+const windowIcon =
+  process.platform === "win32"
+    ? path.join(
+        app.isPackaged ? process.resourcesPath : app.getAppPath(),
+        app.isPackaged ? "icon.ico" : path.join("build", "icon.ico")
+      )
+    : icon;
+const windowIconAsset =
+  process.platform === "win32"
+    ? nativeImage.createFromPath(windowIcon)
+    : windowIcon;
 
 interface CreateMainWindowOptions {
   forceBigPicture?: boolean;
@@ -94,11 +105,12 @@ export class WindowManager {
 
   private static initialConfigInitializationMainWindow: Electron.BrowserWindowConstructorOptions =
     {
+      title: "Hydra",
       width: WindowManager.DEFAULT_WINDOW_WIDTH,
       height: WindowManager.DEFAULT_WINDOW_HEIGHT,
       minWidth: WindowManager.MIN_WINDOW_WIDTH,
       minHeight: WindowManager.MIN_WINDOW_HEIGHT,
-      icon,
+      icon: windowIconAsset,
       trafficLightPosition: { x: 16, y: 16 },
       webPreferences: {
         preload: path.join(__dirname, "../preload/index.mjs"),
@@ -478,7 +490,7 @@ export class WindowManager {
       width: targetBounds.width,
       height: targetBounds.height,
       backgroundColor: "#0a0a0a",
-      icon,
+      icon: windowIconAsset,
       frame: false,
       show: false,
       webPreferences: {
@@ -547,7 +559,7 @@ export class WindowManager {
       // No native frame/controls — the renderer draws its own minimize and
       // close buttons in the title bar (see friends-window.tsx).
       frame: false,
-      icon,
+      icon: windowIconAsset,
       webPreferences: {
         preload: path.join(__dirname, "../preload/index.mjs"),
         sandbox: false,
@@ -675,6 +687,7 @@ export class WindowManager {
       maximizable: false,
       resizable: false,
       minimizable: false,
+      icon: windowIconAsset,
       webPreferences: {
         sandbox: false,
         nodeIntegrationInSubFrames: true,
@@ -716,7 +729,7 @@ export class WindowManager {
       maximizable: false,
       resizable: false,
       frame: false,
-      icon,
+      icon: windowIconAsset,
       backgroundColor: "#1c1c1c",
       webPreferences: {
         preload: path.join(__dirname, "../preload/index.mjs"),
@@ -800,7 +813,7 @@ export class WindowManager {
       resizable: false,
       minimizable: layout.minimizable,
       frame: layout.frame,
-      icon,
+      icon: windowIconAsset,
       webPreferences: {
         preload: path.join(__dirname, "../preload/index.mjs"),
         sandbox: false,
@@ -881,7 +894,7 @@ export class WindowManager {
         minHeight: 540,
         backgroundColor: "#1c1c1c",
         titleBarStyle: process.platform === "linux" ? "default" : "hidden",
-        icon,
+        icon: windowIconAsset,
         trafficLightPosition: { x: 16, y: 16 },
         titleBarOverlay: {
           symbolColor: "#DADBE1",
@@ -963,7 +976,7 @@ export class WindowManager {
       fullscreenable: false,
       frame: false,
       backgroundColor: "#1c1c1c",
-      icon,
+      icon: windowIconAsset,
       skipTaskbar: false,
       webPreferences: {
         preload: path.join(__dirname, "../preload/index.mjs"),
@@ -1149,7 +1162,7 @@ export class WindowManager {
       tray.popUpContextMenu(contextMenu);
     };
 
-    tray.setToolTip("Hydra Launcher");
+    tray.setToolTip("Hydra");
 
     if (process.platform === "win32") {
       await updateSystemTray();

@@ -1,13 +1,141 @@
+import type { FileHandle } from "node:fs/promises";
+import { Writable } from "node:stream";
+
 export const PROGRESS_RESET_THRESHOLD_BYTES = 16 * 1024 * 1024;
 export const MAX_BUDGET_RESETS = 50;
 export const MAX_RESTARTS_FROM_ZERO = 3;
 export const MIN_SEGMENTED_DOWNLOAD_SIZE = 32 * 1024 * 1024;
+export const MAX_SEGMENT_RANGE_BYTES = 64 * 1024 * 1024;
+export const MIN_DYNAMIC_SPLIT_RANGE_BYTES = 8 * 1024 * 1024;
 export const SEGMENTED_DOWNLOAD_CONNECTIONS = 8;
 export const MAX_SEGMENTED_DOWNLOAD_CONNECTIONS = 12;
 
 export interface DownloadByteRange {
   start: number;
   end: number;
+}
+
+export function areDownloadByteRangesContiguous(
+  ranges: DownloadByteRange[],
+  totalBytes: number
+): boolean {
+  if (
+    !Number.isSafeInteger(totalBytes) ||
+    totalBytes <= 0 ||
+    ranges.length === 0
+  ) {
+    return false;
+  }
+
+  const orderedRanges = [...ranges].sort(
+    (left, right) => left.start - right.start
+  );
+  if (orderedRanges[0].start !== 0) return false;
+
+  for (let index = 0; index < orderedRanges.length; index++) {
+    const range = orderedRanges[index];
+    if (
+      !Number.isSafeInteger(range.start) ||
+      !Number.isSafeInteger(range.end) ||
+      range.start < 0 ||
+      range.end < range.start ||
+      (index > 0 && orderedRanges[index - 1].end + 1 !== range.start)
+    ) {
+      return false;
+    }
+  }
+
+  return orderedRanges.at(-1)?.end === totalBytes - 1;
+}
+
+export function areDownloadByteRangesComplete(
+  ranges: DownloadByteRange[],
+  offsets: number[],
+  totalBytes: number
+): boolean {
+  return (
+    areDownloadByteRangesContiguous(ranges, totalBytes) &&
+    ranges.length === offsets.length &&
+    ranges.every(
+      (range, index) => offsets[index] === range.end - range.start + 1
+    )
+  );
+}
+
+export function splitDownloadByteRange(
+  range: DownloadByteRange,
+  completedBytes: number,
+  minimumRangeBytes = MIN_DYNAMIC_SPLIT_RANGE_BYTES
+): [DownloadByteRange, DownloadByteRange] | null {
+  const rangeSize = range.end - range.start + 1;
+  if (
+    !Number.isSafeInteger(completedBytes) ||
+    completedBytes < 0 ||
+    completedBytes > rangeSize ||
+    !Number.isSafeInteger(minimumRangeBytes) ||
+    minimumRangeBytes <= 0 ||
+    rangeSize - completedBytes < minimumRangeBytes * 2
+  ) {
+    return null;
+  }
+
+  const splitLength = Math.max(completedBytes, Math.floor(rangeSize / 2));
+  if (rangeSize - splitLength < minimumRangeBytes) return null;
+
+  const leftRange = {
+    start: range.start,
+    end: range.start + splitLength - 1,
+  };
+  return [
+    leftRange,
+    {
+      start: leftRange.end + 1,
+      end: range.end,
+    },
+  ];
+}
+
+export function createPositionalWriteStream(
+  fileHandle: FileHandle,
+  startPosition: number,
+  highWaterMark: number,
+  onWritten: (byteLength: number) => Promise<void>,
+  signal: AbortSignal
+): Writable {
+  let position = startPosition;
+
+  return new Writable({
+    highWaterMark,
+    write: (chunk: Buffer | string, _encoding, callback) => {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      void (async () => {
+        let written = 0;
+        while (written < buffer.length) {
+          if (signal.aborted) {
+            throw new Error("Segmented file write was aborted.");
+          }
+
+          const result = await fileHandle.write(
+            buffer,
+            written,
+            buffer.length - written,
+            position + written
+          );
+          if (result.bytesWritten <= 0) {
+            throw new Error("The target file write made no progress.");
+          }
+          written += result.bytesWritten;
+        }
+
+        position += written;
+        await onWritten(written);
+      })()
+        .then(() => callback())
+        .catch((error: unknown) =>
+          callback(error instanceof Error ? error : new Error(String(error)))
+        );
+    },
+  });
 }
 
 export function createDownloadByteRanges(

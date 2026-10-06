@@ -26,14 +26,17 @@ asarUnpack:
   - node_modules/@img/sharp-libvips-*/**
 win:
   executableName: Hydra
+  icon: build/icon.ico
   extraResources:
     - from: binaries/7z.exe
     - from: binaries/7z.dll
+    - from: build/icon.ico
+      to: icon.ico
   target:
     - nsis
     - portable
 nsis:
-  artifactName: ${name}-${version}-setup.${ext}
+  artifactName: ${productName}-${version}-setup.${ext}
   shortcutName: ${productName}
   uninstallDisplayName: ${productName}
   createDesktopShortcut: always
@@ -41,7 +44,7 @@ nsis:
   allowToChangeInstallationDirectory: true
   include: installer.nsh
 portable:
-  artifactName: ${name}-${version}-portable.${ext}
+  artifactName: ${productName}-${version}-portable.${ext}
   unpackDirName: false
 mac:
   entitlementsInherit: build/entitlements.mac.plist

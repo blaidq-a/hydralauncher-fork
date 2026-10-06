@@ -110,6 +110,7 @@ export class DownloadManager {
   } | null = null;
   private static queueHeldForDiskSpace = false;
   private static lastQueueRetry = 0;
+  private static readonly finalizingDownloads = new Set<string>();
   private static readonly preparedJsDownloads = new Map<
     string,
     PreparedJsDownload
@@ -117,6 +118,8 @@ export class DownloadManager {
   private static readonly PREPARED_JS_DOWNLOAD_TTL_MS = 120_000;
   private static lastJsProgressPublish = 0;
   private static isPublishingJsProgress = false;
+  private static jsProgressPublishTimer: NodeJS.Timeout | null = null;
+  private static hasPendingJsProgressPublish = false;
 
   public static hasActiveDownload() {
     return this.downloadingGameId !== null;
@@ -663,6 +666,7 @@ export class DownloadManager {
     this.sendProgressUpdate(progress, status, game);
 
     if (
+      !status.isSegmented &&
       shouldFinalizeDownload({
         usingJsDownloader: this.usingJsDownloader,
         isCheckingFiles: status.isCheckingFiles,
@@ -671,7 +675,13 @@ export class DownloadManager {
         downloadStatus: download.status,
       })
     ) {
-      await this.handleDownloadCompletion(download, game, gameId);
+      if (this.finalizingDownloads.has(gameId)) return;
+      this.finalizingDownloads.add(gameId);
+      try {
+        await this.handleDownloadCompletion(download, game, gameId);
+      } finally {
+        this.finalizingDownloads.delete(gameId);
+      }
     }
   }
 
@@ -773,33 +783,57 @@ export class DownloadManager {
   }
 
   private static publishJsDownloadProgress(): void {
-    const now = Date.now();
-    if (this.isPublishingJsProgress || now - this.lastJsProgressPublish < 500) {
-      return;
-    }
+    this.hasPendingJsProgressPublish = true;
+    this.scheduleJsDownloadProgressPublish();
+  }
 
-    this.lastJsProgressPublish = now;
-    this.isPublishingJsProgress = true;
-    void (async () => {
-      try {
-        if (!this.usingJsDownloader || !this.downloadingGameId) return;
+  private static scheduleJsDownloadProgressPublish(): void {
+    if (this.jsProgressPublishTimer) return;
 
-        const status = await this.getDownloadStatusFromJs();
-        if (!status) return;
+    const throttleWait = Math.max(
+      0,
+      1000 - (Date.now() - this.lastJsProgressPublish)
+    );
+    const delay = this.isPublishingJsProgress
+      ? Math.max(1000, throttleWait)
+      : throttleWait;
 
-        const game = await gamesSublevel.get(status.gameId);
-        if (!game) return;
-
-        this.sendProgressUpdate(status.progress, status, game);
-      } catch (error) {
-        logger.error(
-          "[DownloadManager] Failed to publish JS download progress",
-          error
-        );
-      } finally {
-        this.isPublishingJsProgress = false;
+    this.jsProgressPublishTimer = setTimeout(() => {
+      this.jsProgressPublishTimer = null;
+      if (this.isPublishingJsProgress) {
+        this.scheduleJsDownloadProgressPublish();
+        return;
       }
-    })();
+
+      if (!this.hasPendingJsProgressPublish) return;
+      this.hasPendingJsProgressPublish = false;
+      this.lastJsProgressPublish = Date.now();
+      this.isPublishingJsProgress = true;
+
+      void (async () => {
+        try {
+          if (!this.usingJsDownloader || !this.downloadingGameId) return;
+
+          const status = await this.getDownloadStatusFromJs();
+          if (!status) return;
+
+          const game = await gamesSublevel.get(status.gameId);
+          if (!game) return;
+
+          this.sendProgressUpdate(status.progress, status, game);
+        } catch (error) {
+          logger.error(
+            "[DownloadManager] Failed to publish JS download progress",
+            error
+          );
+        } finally {
+          this.isPublishingJsProgress = false;
+          if (this.hasPendingJsProgressPublish) {
+            this.scheduleJsDownloadProgressPublish();
+          }
+        }
+      })();
+    }, delay);
   }
 
   private static async handleDownloadCompletion(
@@ -1170,7 +1204,7 @@ export class DownloadManager {
   static async pauseDownload(downloadKey = this.downloadingGameId) {
     if (this.usingJsDownloader && this.jsDownloader) {
       logger.log("[DownloadManager] Pausing JS download");
-      this.jsDownloader.pauseDownload();
+      await this.jsDownloader.pauseDownload();
     } else if (downloadKey) {
       await TorrentService.call("action", {
         action: "pause",
@@ -1198,7 +1232,7 @@ export class DownloadManager {
 
       if (this.usingJsDownloader && this.jsDownloader) {
         logger.log("[DownloadManager] Cancelling JS download");
-        this.jsDownloader.cancelDownload();
+        await this.jsDownloader.cancelDownload();
         this.jsDownloader = null;
         this.usingJsDownloader = false;
         this.allDebridBatch = null;
@@ -1352,7 +1386,7 @@ export class DownloadManager {
               `The download URL may have returned an error page.`
           );
           const mismatchDownloadId = this.allDebridBatch?.downloadId;
-          this.cleanupBatch();
+          await this.cleanupBatch();
           if (mismatchDownloadId) {
             await this.handleRuntimeDownloadError(
               mismatchDownloadId,
@@ -1371,18 +1405,25 @@ export class DownloadManager {
       } catch (err) {
         logger.error("[DownloadManager] AllDebrid batch entry error:", err);
         const failedDownloadId = this.allDebridBatch?.downloadId;
-        this.cleanupBatch();
+        await this.cleanupBatch();
         if (failedDownloadId) {
           await this.handleRuntimeDownloadError(failedDownloadId, err);
         }
         return;
       }
     }
+
+    if (
+      this.allDebridBatch &&
+      this.allDebridBatch.currentIndex >= this.allDebridBatch.entries.length
+    ) {
+      await this.watchDownloads();
+    }
   }
 
-  private static cleanupBatch() {
+  private static async cleanupBatch() {
     this.usingJsDownloader = false;
-    this.jsDownloader?.cancelDownload();
+    await this.jsDownloader?.cancelDownload();
     this.jsDownloader = null;
     this.allDebridBatch = null;
     this.downloadingGameId = null;
@@ -2128,9 +2169,13 @@ export class DownloadManager {
             return;
           }
 
-          this.jsDownloader = new JsHttpDownloader(() =>
-            this.publishJsDownloadProgress()
-          );
+          const pausedDownloader =
+            this.jsDownloader?.getDownloadStatus()?.status === "paused"
+              ? this.jsDownloader
+              : null;
+          this.jsDownloader =
+            pausedDownloader ??
+            new JsHttpDownloader(() => this.publishJsDownloadProgress());
           this.jsDownloader.setMaxDownloadSpeedBytesPerSecond(
             this.maxDownloadSpeedBytesPerSecond
           );
@@ -2146,6 +2191,14 @@ export class DownloadManager {
                 : undefined;
           this.jsDownloader
             .startDownload({ ...options, maxConnections })
+            .then(async () => {
+              if (
+                this.downloadingGameId === downloadId &&
+                this.jsDownloader?.getDownloadStatus()?.status === "complete"
+              ) {
+                await this.watchDownloads();
+              }
+            })
             .catch((err) => {
               void this.handleRuntimeDownloadError(downloadId, err).catch(
                 (error) => {

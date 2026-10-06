@@ -28,7 +28,7 @@
     "build": "npm run typecheck && electron-vite build",
     "postinstall": "npm run build:native && electron-builder install-app-deps && node ./scripts/postinstall.cjs",
     "build:unpack": "npm run build:native && npm run build && electron-builder --dir",
-    "build:win": "npm run build:native && electron-vite build && electron-builder --win",
+    "build:win": "npm run build && electron-builder --win --config.win.signAndEditExecutable=false",
     "build:mac": "npm run build:native && electron-vite build && electron-builder --mac",
     "build:linux": "npm run build:native && electron-vite build && electron-builder --linux",
     "dev:big-picture": "vite dev src/big-picture",

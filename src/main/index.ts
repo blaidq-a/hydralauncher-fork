@@ -6,7 +6,6 @@ import {
   powerMonitor,
   protocol,
 } from "electron";
-import updater from "electron-updater";
 import i18n from "i18next";
 import path from "node:path";
 import url from "node:url";
@@ -43,16 +42,6 @@ import { steamSyncOrchestrator } from "./services/steam-integration/steam-sync-o
 crashReporter.start({
   uploadToServer: false,
 });
-
-const { autoUpdater } = updater;
-
-autoUpdater.setFeedURL({
-  provider: "github",
-  owner: "hydralauncher",
-  repo: "hydra",
-});
-
-autoUpdater.logger = logger;
 
 const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) app.quit();
@@ -99,8 +88,8 @@ if (process.defaultApp) {
 }
 
 const initializeApp = async () => {
-  refreshPortableShortcutLauncher();
   electronApp.setAppUserModelId("gg.hydralauncher.hydra");
+  refreshPortableShortcutLauncher();
 
   logger.info("Crash dumps directory", app.getPath("crashDumps"));
 
