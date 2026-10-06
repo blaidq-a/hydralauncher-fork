@@ -88,7 +88,7 @@ if (process.defaultApp) {
 }
 
 const initializeApp = async () => {
-  electronApp.setAppUserModelId("gg.hydralauncher.hydra");
+  electronApp.setAppUserModelId("com.hydralauncher.hydra");
   refreshPortableShortcutLauncher();
 
   logger.info("Crash dumps directory", app.getPath("crashDumps"));

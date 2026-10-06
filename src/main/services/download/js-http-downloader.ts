@@ -1536,7 +1536,8 @@ export class JsHttpDownloader {
       );
       
       // Update checkpoint offsets AFTER segment write is fully complete
-      checkpoint.offsets[segmentIndex] = segmentBytesWritten;
+      // Clamp to expected size to avoid buffer padding overage
+      checkpoint.offsets[segmentIndex] = Math.min(segmentBytesWritten, expectedSegmentSize);
       
       // Validate segment completion with exact byte count
       const segmentSize = checkpoint.offsets[segmentIndex];
