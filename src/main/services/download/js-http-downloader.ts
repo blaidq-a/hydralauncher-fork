@@ -997,10 +997,11 @@ export class JsHttpDownloader {
       // If file is already complete or near-complete, mark as done immediately
       if (targetStats && targetStats.size >= fileSize * 0.999) {
         logger.log(
-          `[JsHttpDownloader] Target file already ${(targetStats.size / fileSize * 100).toFixed(2)}% complete; finalizing segmented download`
+          `[JsHttpDownloader] Target file already ${(targetStats.size / fileSize * 100).toFixed(2)}% complete; marking all segments complete`
         );
-        await targetHandle.truncate(fileSize);
+        // Mark all segments as complete
         offsets = ranges.map((range) => range.end - range.start + 1);
+        // Persist this state immediately before proceeding
       } else if (!validExistingData) {
         offsets = ranges.map(() => 0);
       }
@@ -1052,18 +1053,31 @@ export class JsHttpDownloader {
     let completed = false;
     try {
       await this.persistSegmentedCheckpoint(checkpoint);
-      await this.downloadSegmentsWithFallback({
-        url,
-        requestHeaders,
-        fileSize,
-        ranges,
-        checkpoint,
-        targetHandle,
-        controller: segmentController,
-        maxConnections,
-      });
+      
+      // Check if download is already near-complete before attempting segment download
+      const downloadedSoFar = offsets.reduce((total, offset) => total + offset, 0);
+      if (downloadedSoFar >= fileSize * 0.999) {
+        logger.log(
+          `[JsHttpDownloader] Download already ${(downloadedSoFar / fileSize * 100).toFixed(2)}% complete; skipping segment download loop and finalizing`
+        );
+        // Mark all segments as complete
+        checkpoint.offsets = ranges.map((range) => range.end - range.start + 1);
+        await this.persistSegmentedCheckpoint(checkpoint, true);
+      } else {
+        // Only run segment download if significant bytes are still needed
+        await this.downloadSegmentsWithFallback({
+          url,
+          requestHeaders,
+          fileSize,
+          ranges,
+          checkpoint,
+          targetHandle,
+          controller: segmentController,
+          maxConnections,
+        });
 
-      await this.persistSegmentedCheckpoint(checkpoint, true);
+        await this.persistSegmentedCheckpoint(checkpoint, true);
+      }
       
       // Verify all byte ranges are truly complete before declaring success
       const allSegmentsComplete = ranges.every((range, idx) => {
