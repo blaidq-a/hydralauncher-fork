@@ -1181,6 +1181,21 @@ export class JsHttpDownloader {
       controller,
       maxConnections,
     } = input;
+
+    // Early exit: if all segments are already fully downloaded, skip the download loop entirely
+    const allSegmentsAlreadyComplete = ranges.every((range, idx) => {
+      const expectedSize = range.end - range.start + 1;
+      const actualSize = checkpoint.offsets[idx] ?? 0;
+      return actualSize >= expectedSize;
+    });
+
+    if (allSegmentsAlreadyComplete) {
+      logger.log(
+        "[JsHttpDownloader] All segments already fully downloaded; skipping download loop"
+      );
+      return;
+    }
+
     const retryCounts = ranges.map(() => 0);
     const pendingSegments = ranges.map((_range, index) => index);
     const activeSegmentControllers = new Map<number, AbortController>();
