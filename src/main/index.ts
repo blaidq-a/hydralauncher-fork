@@ -93,6 +93,14 @@ const initializeApp = async () => {
 
   logger.info("Crash dumps directory", app.getPath("crashDumps"));
 
+  // Enable memory optimization
+  if ((global as any).gc) {
+    // Garbage collection hint interval (every 30 seconds)
+    setInterval(() => {
+      (global as any).gc();
+    }, 30000);
+  }
+
   protocol.handle("local", (request) => {
     const filePath = request.url.slice("local:".length);
     return net.fetch(url.pathToFileURL(decodeURI(filePath)).toString());
@@ -201,6 +209,21 @@ const initializeApp = async () => {
 
   if (deepLinkArg) {
     handleDeepLinkPath(deepLinkArg);
+  }
+
+  // Start checking for updates
+  try {
+    const updateModule = await import("./services/update-manager");
+    const UpdateManager = (updateModule as any).UpdateManager;
+    if (UpdateManager?.startPeriodicCheck) {
+      UpdateManager.startPeriodicCheck();
+    }
+    // Also check immediately
+    if (UpdateManager?.checkForUpdates) {
+      UpdateManager.checkForUpdates();
+    }
+  } catch (error) {
+    logger.error("[InitializeApp] Failed to start UpdateManager", error);
   }
 };
 

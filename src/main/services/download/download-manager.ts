@@ -872,6 +872,8 @@ export class DownloadManager {
       });
     }
 
+    // Always trigger extraction immediately if auto-extract is enabled
+    // Don't pause for seeding first; extraction can run in parallel or after seeding
     if (download.automaticallyExtract) {
       const shouldPauseSeedingForExtraction =
         shouldSeed && download.downloader === Downloader.Torrent;
@@ -888,6 +890,7 @@ export class DownloadManager {
           });
         });
       } else {
+        // For JS downloader or non-seeding scenarios, start extraction immediately
         void this.handleExtraction(download, game);
       }
     } else {

@@ -1346,6 +1346,25 @@ contextBridge.exposeInMainWorld("electron", {
   deleteArchive: (filePath: string) =>
     ipcRenderer.invoke("deleteArchive", filePath),
 
+  /* Updates */
+  checkForUpdates: () => ipcRenderer.invoke("checkForUpdates"),
+  restartAndInstallUpdate: (downloadUrl: string) =>
+    ipcRenderer.invoke("restartAndInstallUpdate", downloadUrl),
+  onUpdateAvailable: (
+    cb: (update: {
+      version: string;
+      downloadUrl: string;
+      releaseUrl: string;
+    }) => void
+  ) => {
+    const listener = (
+      _event: Electron.IpcRendererEvent,
+      update: { version: string; downloadUrl: string; releaseUrl: string }
+    ) => cb(update);
+    ipcRenderer.on("update-available", listener);
+    return () => ipcRenderer.removeListener("update-available", listener);
+  },
+
   /* Hardware */
   getDiskFreeSpace: (path: string) =>
     ipcRenderer.invoke("getDiskFreeSpace", path),
@@ -1660,8 +1679,6 @@ contextBridge.exposeInMainWorld("electron", {
   },
   resetCommonRedistPreflight: () =>
     ipcRenderer.invoke("resetCommonRedistPreflight"),
-  checkForUpdates: () => ipcRenderer.invoke("checkForUpdates"),
-  restartAndInstallUpdate: () => ipcRenderer.invoke("restartAndInstallUpdate"),
 
   /* Profile */
   getMe: () => ipcRenderer.invoke("getMe"),

@@ -180,7 +180,8 @@ export const publishDownloadHaltedNotification = async (game: Game) => {
 };
 
 export const publishNotificationUpdateReadyToInstall = async (
-  version: string
+  version: string,
+  downloadUrl: string
 ) => {
   const title = t("new_update_available", {
     ns: "notifications",
@@ -196,7 +197,7 @@ export const publishNotificationUpdateReadyToInstall = async (
     icon: trayIcon,
   })
     .on("click", () => {
-      restartAndInstallUpdate();
+      restartAndInstallUpdate(downloadUrl);
     })
     .show();
 
