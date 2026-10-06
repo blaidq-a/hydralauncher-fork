@@ -1489,12 +1489,14 @@ export class JsHttpDownloader {
       );
     }
 
+    let segmentBytesWritten = 0;
     const writeStream = createPositionalWriteStream(
       targetHandle,
       range.start + existingBytes,
       DOWNLOAD_BUFFER_SIZE,
       async (writtenBytes) => {
-        checkpoint.offsets[segmentIndex] += writtenBytes;
+        // Track bytes written for this segment only; don't update checkpoint.offsets yet
+        segmentBytesWritten += writtenBytes;
         this.bytesDownloaded += writtenBytes;
         this.updateSpeed();
         this.onProgress?.();
@@ -1517,6 +1519,9 @@ export class JsHttpDownloader {
         writeStream,
         { signal: attemptController.signal }
       );
+      
+      // Update checkpoint offsets AFTER segment write is fully complete
+      checkpoint.offsets[segmentIndex] = segmentBytesWritten;
       
       // Validate segment completion with exact byte count
       const segmentSize = checkpoint.offsets[segmentIndex];
@@ -1936,6 +1941,14 @@ export class JsHttpDownloader {
     if (!this.currentOptions) {
       throw new Error("No download options available for resume");
     }
+    
+    // Force persist any pending checkpoint before resuming
+    if (this.segmentedDownload && this.checkpointTimer) {
+      clearTimeout(this.checkpointTimer);
+      this.checkpointTimer = null;
+      await this.persistSegmentedCheckpoint(this.segmentedDownload, true);
+    }
+    
     this.isDownloading = false;
     this.isPaused = false;
     this.retryCount = 0;
@@ -2065,9 +2078,6 @@ export class JsHttpDownloader {
       progress = 1;
     } else if (this.fileSize > 0) {
       progress = clampProgress(this.bytesDownloaded / this.fileSize);
-    }
-    if (this.isSegmented && this.status !== "complete") {
-      progress = Math.min(progress, 0.999999);
     }
 
     return {
