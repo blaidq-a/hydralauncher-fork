@@ -210,6 +210,42 @@ describe("realtime WebSocket helpers", () => {
 });
 
 describe("RealtimeWebSocketClient", () => {
+  it("logs a repeated token-mint failure only once until the socket connects", async () => {
+    const sleeps: Array<() => void> = [];
+    const errors: unknown[] = [];
+    let mints = 0;
+    const client = new RealtimeWebSocketClient({
+      mintToken: async () => {
+        mints++;
+        throw new Error("API unavailable");
+      },
+      onEvent: () => undefined,
+      onReconnect: () => undefined,
+      sleep: async (_ms, signal) =>
+        new Promise<void>((resolve) => {
+          sleeps.push(resolve);
+          signal.addEventListener("abort", () => resolve(), { once: true });
+        }),
+      log: {
+        info: () => undefined,
+        warn: () => undefined,
+        error: (_message, error) => errors.push(error),
+      },
+    });
+
+    client.connect();
+    await tick();
+    assert.equal(mints, 1);
+    assert.equal(errors.length, 1);
+
+    sleeps[0]();
+    await tick();
+    assert.equal(mints, 2);
+    assert.equal(errors.length, 1);
+
+    client.close();
+  });
+
   it("keeps one loop and closes a superseded socket", async () => {
     const harness = makeHarness();
     harness.client.connect();

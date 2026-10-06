@@ -314,7 +314,11 @@ function HeroDownloadTime({
 
   let label: ReactNode = tGameDetails("calculating_eta");
 
-  if (isDownloadingMetadata) {
+  if (lastPacket?.isMerging) {
+    label = tGameDetails("merging_download", {
+      defaultValue: "Merging downloaded segments…",
+    });
+  } else if (isDownloadingMetadata) {
     label = (
       <GuideLink article="downloading-metadata">
         {t("downloading_metadata")}
@@ -351,6 +355,7 @@ function HeroDownloadView({
   t,
 }: Readonly<HeroDownloadViewProps>) {
   const navigate = useNavigate();
+  const { t: tGameDetails } = useTranslation("game_details");
 
   const handleLogoClick = useCallback(() => {
     navigate(buildGameDetailsPath(game));
@@ -411,6 +416,13 @@ function HeroDownloadView({
                     {t("extracting")}
                   </span>
                 )}
+                {!isGameExtracting && lastPacket?.isMerging && (
+                  <span className="download-group__progress-status">
+                    {tGameDetails("merging_download", {
+                      defaultValue: "Merging downloaded segments…",
+                    })}
+                  </span>
+                )}
                 {!isGameExtracting && lastPacket?.isCheckingFiles && (
                   <span className="download-group__progress-status">
                     {t("checking_files")}
@@ -427,6 +439,7 @@ function HeroDownloadView({
                   </span>
                 )}
                 {!isGameExtracting &&
+                  !lastPacket?.isMerging &&
                   !lastPacket?.isCheckingFiles &&
                   !isReconnecting &&
                   !isRecovering && (

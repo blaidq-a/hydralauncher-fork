@@ -20,6 +20,7 @@ import {
 import { isArchiveOrgFileUri } from "./archive-org";
 import { charMap } from "./char-map";
 import { Downloader } from "./constants";
+import { getHosterDownloader } from "./hoster-routing";
 import { format } from "date-fns";
 import { AchievementNotificationInfo, GameRepack } from "@types";
 
@@ -159,33 +160,13 @@ export const formatName = pipe<string>(
   (str) => str.trim()
 );
 
-const realDebridHosts = ["https://1fichier.com", "https://mediafire.com"];
-
 export const getDownloadersForUri = (uri: string) => {
-  if (uri.startsWith("https://gofile.io")) return [Downloader.Gofile];
+  const hosterDownloader = getHosterDownloader(uri);
+  if (hosterDownloader !== undefined) return [hosterDownloader];
 
-  if (uri.startsWith("https://pixeldrain.com")) return [Downloader.PixelDrain];
-  if (uri.startsWith("https://datanodes.to")) return [Downloader.Datanodes];
-  if (uri.startsWith("https://www.mediafire.com"))
-    return [Downloader.Mediafire];
-  if (uri.startsWith("https://fuckingfast.co")) {
-    return [Downloader.FuckingFast];
-  }
-  if (
-    uri.startsWith("https://vikingfile.com") ||
-    uri.startsWith("https://vik1ngfile.site")
-  ) {
-    return [Downloader.VikingFile];
-  }
-  if (uri.startsWith("https://www.rootz.so")) {
-    return [Downloader.Rootz];
-  }
   if (isArchiveOrgFileUri(uri)) {
     return [Downloader.ArchiveOrg];
   }
-
-  if (realDebridHosts.some((host) => uri.startsWith(host)))
-    return [Downloader.RealDebrid];
 
   if (uri.startsWith("magnet:")) {
     return [

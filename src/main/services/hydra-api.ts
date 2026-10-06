@@ -15,6 +15,7 @@ import {
   sanitizeNetworkLogPayload,
   summarizeNetworkLogPayload,
 } from "./network-log-payload";
+import { resolveHydraApiBaseUrl } from "./hydra-api-url";
 
 declare module "axios" {
   interface AxiosRequestConfig {
@@ -198,7 +199,7 @@ export class HydraApi {
 
   static async setupApi() {
     this.instance = axios.create({
-      baseURL: import.meta.env.MAIN_VITE_API_URL,
+      baseURL: resolveHydraApiBaseUrl(import.meta.env.MAIN_VITE_API_URL),
       headers: { "User-Agent": `Hydra Launcher v${appVersion}` },
     });
 

@@ -1,6 +1,6 @@
 import { Downloader } from "@shared";
 
-export const DOWNLOADER_NAME = {
+export const DOWNLOADER_NAME: Record<Downloader, string> = {
   [Downloader.RealDebrid]: "Real-Debrid",
   [Downloader.Torrent]: "Torrent",
   [Downloader.Gofile]: "Gofile",
@@ -15,6 +15,8 @@ export const DOWNLOADER_NAME = {
   [Downloader.Premiumize]: "Premiumize",
   [Downloader.AllDebrid]: "AllDebrid",
   [Downloader.ArchiveOrg]: "Archive.org",
+  [Downloader.MegaDB]: "MegaDB",
+  [Downloader.Buzzheavier]: "Buzzheavier",
 };
 
 export const MAX_MINUTES_TO_SHOW_IN_PLAYTIME = 120;

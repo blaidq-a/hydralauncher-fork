@@ -18,6 +18,8 @@ import {
   FuckingFastApi,
   VikingFileApi,
   RootzApi,
+  MegaDBApi,
+  BuzzheavierApi,
 } from "../hosters";
 import { TorrentService } from "../torrent-service";
 import {
@@ -113,6 +115,8 @@ export class DownloadManager {
     PreparedJsDownload
   >();
   private static readonly PREPARED_JS_DOWNLOAD_TTL_MS = 120_000;
+  private static lastJsProgressPublish = 0;
+  private static isPublishingJsProgress = false;
 
   public static hasActiveDownload() {
     return this.downloadingGameId !== null;
@@ -512,6 +516,8 @@ export class DownloadManager {
         isReconnecting: status.isReconnecting,
         isRecovering: status.isRecovering,
         recoveryProgress: status.recoveryProgress,
+        isSegmented: status.isSegmented,
+        isMerging: status.isMerging,
         progress,
         gameId: downloadId,
         download: updatedDownload,
@@ -764,6 +770,36 @@ export class DownloadManager {
       "on-download-progress",
       structuredClone({ ...status, game })
     );
+  }
+
+  private static publishJsDownloadProgress(): void {
+    const now = Date.now();
+    if (this.isPublishingJsProgress || now - this.lastJsProgressPublish < 500) {
+      return;
+    }
+
+    this.lastJsProgressPublish = now;
+    this.isPublishingJsProgress = true;
+    void (async () => {
+      try {
+        if (!this.usingJsDownloader || !this.downloadingGameId) return;
+
+        const status = await this.getDownloadStatusFromJs();
+        if (!status) return;
+
+        const game = await gamesSublevel.get(status.gameId);
+        if (!game) return;
+
+        this.sendProgressUpdate(status.progress, status, game);
+      } catch (error) {
+        logger.error(
+          "[DownloadManager] Failed to publish JS download progress",
+          error
+        );
+      } finally {
+        this.isPublishingJsProgress = false;
+      }
+    })();
   }
 
   private static async handleDownloadCompletion(
@@ -1234,6 +1270,10 @@ export class DownloadManager {
         return this.getVikingFileDownloadOptions(download, resumingFilename);
       case Downloader.Rootz:
         return this.getRootzDownloadOptions(download, resumingFilename);
+      case Downloader.MegaDB:
+        return this.getMegaDBDownloadOptions(download, resumingFilename);
+      case Downloader.Buzzheavier:
+        return this.getBuzzheavierDownloadOptions(download, resumingFilename);
       case Downloader.ArchiveOrg:
         return this.getArchiveOrgDownloadOptions(download, resumingFilename);
       default:
@@ -1600,6 +1640,40 @@ export class DownloadManager {
     );
   }
 
+  private static async getMegaDBDownloadOptions(
+    download: Download,
+    resumingFilename?: string
+  ) {
+    const downloadUrl = await MegaDBApi.getDownloadUrl(download.uri);
+    const filename = this.resolveFilename(
+      resumingFilename,
+      download.uri,
+      downloadUrl
+    );
+    return this.buildDownloadOptions(
+      downloadUrl,
+      download.downloadPath,
+      filename
+    );
+  }
+
+  private static async getBuzzheavierDownloadOptions(
+    download: Download,
+    resumingFilename?: string
+  ) {
+    const downloadUrl = await BuzzheavierApi.getDownloadUrl(download.uri);
+    const filename = this.resolveFilename(
+      resumingFilename,
+      download.uri,
+      downloadUrl
+    );
+    return this.buildDownloadOptions(
+      downloadUrl,
+      download.downloadPath,
+      filename
+    );
+  }
+
   private static async getDownloadPayload(download: Download) {
     const downloadId = levelKeys.game(download.shop, download.objectId);
 
@@ -1767,6 +1841,24 @@ export class DownloadManager {
       }
       case Downloader.Rootz: {
         const downloadUrl = await RootzApi.getDownloadUrl(download.uri);
+        return {
+          action: "start",
+          game_id: downloadId,
+          url: downloadUrl,
+          save_path: download.downloadPath,
+        };
+      }
+      case Downloader.MegaDB: {
+        const downloadUrl = await MegaDBApi.getDownloadUrl(download.uri);
+        return {
+          action: "start",
+          game_id: downloadId,
+          url: downloadUrl,
+          save_path: download.downloadPath,
+        };
+      }
+      case Downloader.Buzzheavier: {
+        const downloadUrl = await BuzzheavierApi.getDownloadUrl(download.uri);
         return {
           action: "start",
           game_id: downloadId,
@@ -2009,7 +2101,9 @@ export class DownloadManager {
           }
 
           this.allDebridBatch = batchState;
-          this.jsDownloader = new JsHttpDownloader();
+          this.jsDownloader = new JsHttpDownloader(() =>
+            this.publishJsDownloadProgress()
+          );
           this.jsDownloader.setMaxDownloadSpeedBytesPerSecond(
             this.maxDownloadSpeedBytesPerSecond
           );
@@ -2034,23 +2128,34 @@ export class DownloadManager {
             return;
           }
 
-          this.jsDownloader = new JsHttpDownloader();
+          this.jsDownloader = new JsHttpDownloader(() =>
+            this.publishJsDownloadProgress()
+          );
           this.jsDownloader.setMaxDownloadSpeedBytesPerSecond(
             this.maxDownloadSpeedBytesPerSecond
           );
           this.isPreparingDownload = false;
 
           this.logResolvedUrl(options.url);
-          this.jsDownloader.startDownload(options).catch((err) => {
-            void this.handleRuntimeDownloadError(downloadId, err).catch(
-              (error) => {
-                logger.error(
-                  `[DownloadManager] Failed to handle download error for ${downloadId}`,
-                  error
-                );
-              }
-            );
-          });
+          const maxConnections =
+            download.downloader === Downloader.Gofile
+              ? 4
+              : download.downloader === Downloader.Buzzheavier ||
+                  download.downloader === Downloader.PixelDrain
+                ? 12
+                : undefined;
+          this.jsDownloader
+            .startDownload({ ...options, maxConnections })
+            .catch((err) => {
+              void this.handleRuntimeDownloadError(downloadId, err).catch(
+                (error) => {
+                  logger.error(
+                    `[DownloadManager] Failed to handle download error for ${downloadId}`,
+                    error
+                  );
+                }
+              );
+            });
         }
       } catch (err) {
         if (this.startGeneration === myGeneration) {

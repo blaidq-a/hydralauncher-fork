@@ -230,6 +230,7 @@ export class RealtimeWebSocketClient {
   >;
   private readonly heartbeatIntervalMs: number;
   private readonly log: NonNullable<RealtimeClientOptions["log"]>;
+  private hasLoggedConnectionFailure = false;
 
   constructor(private readonly options: RealtimeClientOptions) {
     this.random = options.random ?? Math.random;
@@ -244,6 +245,7 @@ export class RealtimeWebSocketClient {
 
   connect() {
     this.stop(false);
+    this.hasLoggedConnectionFailure = false;
     this.masterAbort = new AbortController();
     void this.runLoop(this.epoch, this.masterAbort.signal);
   }
@@ -301,6 +303,7 @@ export class RealtimeWebSocketClient {
 
       const result = await this.connectOnce(epoch, attemptAbort.signal, () => {
         attempt = 0;
+        this.hasLoggedConnectionFailure = false;
         if (hasConnectedBefore) this.options.onReconnect(attemptAbort.signal);
         hasConnectedBefore = true;
       })
@@ -313,8 +316,10 @@ export class RealtimeWebSocketClient {
             };
           }
           if (this.options.shouldStop?.(error)) return TERMINAL_ATTEMPT;
-          if (!signal.aborted)
+          if (!signal.aborted && !this.hasLoggedConnectionFailure) {
             this.log.error("Realtime WebSocket error", error);
+            this.hasLoggedConnectionFailure = true;
+          }
           return {
             connected: false,
             retryAfterMs: null,
@@ -562,7 +567,10 @@ export class RealtimeWebSocketClient {
         finish(response.statusCode === 503);
       });
       socket.on("error", (error) => {
-        if (isActive()) this.log.error("Realtime socket error", error);
+        if (isActive() && !this.hasLoggedConnectionFailure) {
+          this.hasLoggedConnectionFailure = true;
+          this.log.error("Realtime socket error", error);
+        }
       });
       socket.on("close", (code, reason) => {
         if (epoch !== this.epoch) return finish();

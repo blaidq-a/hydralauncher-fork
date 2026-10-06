@@ -254,6 +254,8 @@ const handleNetworkError = (err: unknown): DownloadErrorResult | null => {
 
 const HOST_NAMES: Partial<Record<Downloader, string>> = {
   [Downloader.FuckingFast]: "FuckingFast",
+  [Downloader.MegaDB]: "MegaDB",
+  [Downloader.Buzzheavier]: "Buzzheavier",
 };
 
 // Gofile reports a deleted, expired or emptied link through several different

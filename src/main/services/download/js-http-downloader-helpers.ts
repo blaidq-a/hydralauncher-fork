@@ -1,6 +1,41 @@
 export const PROGRESS_RESET_THRESHOLD_BYTES = 16 * 1024 * 1024;
 export const MAX_BUDGET_RESETS = 50;
 export const MAX_RESTARTS_FROM_ZERO = 3;
+export const MIN_SEGMENTED_DOWNLOAD_SIZE = 32 * 1024 * 1024;
+export const SEGMENTED_DOWNLOAD_CONNECTIONS = 8;
+export const MAX_SEGMENTED_DOWNLOAD_CONNECTIONS = 12;
+
+export interface DownloadByteRange {
+  start: number;
+  end: number;
+}
+
+export function createDownloadByteRanges(
+  fileSize: number,
+  connectionCount = SEGMENTED_DOWNLOAD_CONNECTIONS
+): DownloadByteRange[] {
+  if (
+    !Number.isSafeInteger(fileSize) ||
+    fileSize <= 0 ||
+    !Number.isSafeInteger(connectionCount) ||
+    connectionCount <= 0
+  ) {
+    return [];
+  }
+
+  const count = Math.min(connectionCount, fileSize);
+  const bytesPerRange = Math.ceil(fileSize / count);
+  const ranges: DownloadByteRange[] = [];
+
+  for (let start = 0; start < fileSize; start += bytesPerRange) {
+    ranges.push({
+      start,
+      end: Math.min(start + bytesPerRange - 1, fileSize - 1),
+    });
+  }
+
+  return ranges;
+}
 
 export const RETRYABLE_ERROR_CODES = new Set([
   "ECONNRESET",

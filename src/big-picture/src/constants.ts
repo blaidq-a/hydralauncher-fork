@@ -24,4 +24,6 @@ export const DOWNLOADER_NAME: Record<Downloader, string> = {
   [Downloader.Premiumize]: "Premiumize",
   [Downloader.AllDebrid]: "AllDebrid",
   [Downloader.ArchiveOrg]: "Archive.org",
+  [Downloader.MegaDB]: "MegaDB",
+  [Downloader.Buzzheavier]: "Buzzheavier",
 };

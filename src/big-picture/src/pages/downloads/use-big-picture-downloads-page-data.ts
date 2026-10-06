@@ -354,6 +354,8 @@ export function useBigPictureDownloadsPageData() {
       pauseOrResumeAction = "resume";
     } else if (isExtracting) {
       statusLabel = "Extracting";
+    } else if (shouldUseLivePacket && lastPacket?.isMerging) {
+      statusLabel = "Merging downloaded segments…";
     } else if (lastPacket?.isRecovering) {
       statusLabel = `Recovering download… ${Math.round(
         (lastPacket.recoveryProgress ?? 0) * 100
@@ -604,6 +606,7 @@ export function useBigPictureDownloadsPageData() {
 
     const shouldZeroSpeed =
       activeGame.download.extracting ||
+      lastPacket?.isMerging ||
       lastPacket?.isReconnecting ||
       lastPacket?.isCheckingFiles ||
       lastPacket?.isDownloadingMetadata ||
@@ -630,6 +633,7 @@ export function useBigPictureDownloadsPageData() {
     lastPacket?.downloadSpeed,
     lastPacket?.gameId,
     lastPacket?.isReconnecting,
+    lastPacket?.isMerging,
     lastPacket?.isCheckingFiles,
     lastPacket?.isDownloadingMetadata,
     lastPacket?.numPeers,
