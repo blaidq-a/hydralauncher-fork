@@ -109,26 +109,30 @@ export function createPositionalWriteStream(
     write: (chunk: Buffer | string, _encoding, callback) => {
       const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       void (async () => {
-        let written = 0;
-        while (written < buffer.length) {
+        let totalWritten = 0;
+        let offset = 0;
+        
+        while (offset < buffer.length) {
           if (signal.aborted) {
             throw new Error("Segmented file write was aborted.");
           }
 
           const result = await fileHandle.write(
             buffer,
-            written,
-            buffer.length - written,
-            position + written
+            offset,
+            buffer.length - offset,
+            position + totalWritten
           );
           if (result.bytesWritten <= 0) {
             throw new Error("The target file write made no progress.");
           }
-          written += result.bytesWritten;
+          
+          totalWritten += result.bytesWritten;
+          offset += result.bytesWritten;
         }
 
-        position += written;
-        await onWritten(written);
+        position += totalWritten;
+        await onWritten(totalWritten);
       })()
         .then(() => callback())
         .catch((error: unknown) =>
