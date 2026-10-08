@@ -13,15 +13,30 @@ if (!process.env.BUILD_WEBHOOK_URL && !isRelease) {
 }
 
 if (isRelease) {
-  for (const name of [
+  const requiredStorageConfiguration = [
     "S3_ENDPOINT",
     "S3_ACCESS_KEY_ID",
     "S3_SECRET_ACCESS_KEY",
     "S3_BUILDS_BUCKET_NAME",
     "BUILDS_URL",
-  ]) {
-    if (!process.env[name])
-      throw new Error(`Missing ${name} for release upload`);
+  ];
+  const missingStorageConfiguration = requiredStorageConfiguration.filter(
+    (name) => !process.env[name]
+  );
+
+  if (
+    missingStorageConfiguration.length === requiredStorageConfiguration.length
+  ) {
+    console.log(
+      "No release storage is configured; skipping the external build upload."
+    );
+    process.exit(0);
+  }
+
+  if (missingStorageConfiguration.length > 0) {
+    throw new Error(
+      `Incomplete release storage configuration: ${missingStorageConfiguration.join(", ")}`
+    );
   }
 }
 

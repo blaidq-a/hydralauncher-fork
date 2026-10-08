@@ -1,5 +1,8 @@
 name: Release
 
+permissions:
+  contents: write
+
 env:
   RELEASE_ARTIFACT_RETENTION_DAYS: 7
 
@@ -144,9 +147,14 @@ jobs:
           BUILD_FLAVOR: release
         run: node scripts/upload-build.cjs
 
-      - name: Release
+      - name: Resolve release tag
+        id: release
+        run: node -e "require('node:fs').appendFileSync(process.env.GITHUB_OUTPUT, 'tag=v' + require('./package.json').version + '\n')"
+
+      - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.release.outputs.tag }}
           draft: true
           files: |
             dist/*.exe
