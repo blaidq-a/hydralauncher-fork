@@ -59,6 +59,7 @@ const windowIconAsset =
   process.platform === "win32"
     ? nativeImage.createFromPath(windowIcon)
     : windowIcon;
+const HYDRA_WINDOW_TITLE = "Hydra";
 
 interface CreateMainWindowOptions {
   forceBigPicture?: boolean;
@@ -107,7 +108,7 @@ export class WindowManager {
 
   private static initialConfigInitializationMainWindow: Electron.BrowserWindowConstructorOptions =
     {
-      title: "Hydra",
+      title: HYDRA_WINDOW_TITLE,
       width: WindowManager.DEFAULT_WINDOW_WIDTH,
       height: WindowManager.DEFAULT_WINDOW_HEIGHT,
       minWidth: WindowManager.MIN_WINDOW_WIDTH,
@@ -487,6 +488,7 @@ export class WindowManager {
     const targetBounds = targetDisplay.bounds;
 
     this.bigPicture = new BrowserWindow({
+      title: HYDRA_WINDOW_TITLE,
       x: targetBounds.x,
       y: targetBounds.y,
       width: targetBounds.width,
@@ -551,6 +553,7 @@ export class WindowManager {
     }
 
     this.friendsWindow = new BrowserWindow({
+      title: HYDRA_WINDOW_TITLE,
       width: 420,
       height: 780,
       minWidth: 420,
@@ -711,6 +714,7 @@ export class WindowManager {
     }
 
     const authWindow = new BrowserWindow({
+      title: HYDRA_WINDOW_TITLE,
       width: AUTH_WINDOW_CONTENT_WIDTH,
       height: AUTH_WINDOW_CONTENT_HEIGHT,
       backgroundColor: "#1c1c1c",
@@ -756,6 +760,7 @@ export class WindowManager {
     authUrl: string
   ) {
     const authWindow = new BrowserWindow({
+      title: HYDRA_WINDOW_TITLE,
       width: AUTH_WINDOW_CONTENT_WIDTH + CUSTOM_WINDOW_BORDER_WIDTH * 2,
       height:
         AUTH_WINDOW_CONTENT_HEIGHT +
@@ -926,6 +931,7 @@ export class WindowManager {
       }
 
       const editorWindow = new BrowserWindow({
+        title: HYDRA_WINDOW_TITLE,
         width: 720,
         height: 720,
         minWidth: 600,
@@ -1004,6 +1010,7 @@ export class WindowManager {
     );
 
     const gameLauncherWindow = new BrowserWindow({
+      title: HYDRA_WINDOW_TITLE,
       width: this.GAME_LAUNCHER_WINDOW_WIDTH,
       height: this.GAME_LAUNCHER_WINDOW_HEIGHT,
       x,

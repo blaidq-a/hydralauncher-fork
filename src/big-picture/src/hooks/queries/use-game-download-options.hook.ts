@@ -10,18 +10,7 @@ import { orderBy } from "lodash-es";
 
 export type DownloadOptionsEmptyStateReason =
   | "no-configured-sources"
-  | "no-game-sources"
   | "no-download-options";
-
-function getKnownGameSourcesEmptyStateReason(
-  downloadSources: string[] | undefined
-): DownloadOptionsEmptyStateReason | null {
-  if (Array.isArray(downloadSources) && downloadSources.length === 0) {
-    return "no-game-sources";
-  }
-
-  return null;
-}
 
 interface DownloadStateSetters {
   setDownloadOptions: (v: GameRepack[]) => void;
@@ -66,19 +55,6 @@ function setNoConfiguredSourcesState(
   });
 }
 
-function setKnownEmptyState(
-  signal: { cancelled: boolean },
-  setters: DownloadStateSetters,
-  reason: DownloadOptionsEmptyStateReason
-) {
-  applyIfNotCancelled(signal, () => {
-    setters.setDownloadOptions([]);
-    setters.setIsCheckingSources(false);
-    setters.setIsLoading(false);
-    setters.setEmptyStateReason(reason);
-  });
-}
-
 function startRemoteDownloadOptionsLoading(
   signal: { cancelled: boolean },
   setters: DownloadStateSetters
@@ -119,8 +95,7 @@ function setNoDownloadOptionsState(
 async function fetchDownloadOptions(
   game: Pick<Game, "objectId" | "shop">,
   signal: { cancelled: boolean },
-  setters: DownloadStateSetters,
-  knownGameSourcesEmptyStateReason: DownloadOptionsEmptyStateReason | null
+  setters: DownloadStateSetters
 ) {
   resetDownloadOptionsState(signal, setters);
 
@@ -142,11 +117,6 @@ async function fetchDownloadOptions(
 
   if (sortedSources.length === 0) {
     setNoConfiguredSourcesState(signal, setters);
-    return;
-  }
-
-  if (knownGameSourcesEmptyStateReason !== null) {
-    setKnownEmptyState(signal, setters, knownGameSourcesEmptyStateReason);
     return;
   }
 
@@ -190,33 +160,21 @@ async function fetchDownloadOptions(
 }
 
 export function useGameDownloadOptions(
-  game: Pick<Game, "objectId" | "shop"> & {
-    downloadSources?: string[];
-  },
+  game: Pick<Game, "objectId" | "shop">,
   visible: boolean
 ) {
   const shouldLoadDownloadOptions =
     visible && IS_DESKTOP && game.shop !== "custom";
-  const knownGameSourcesEmptyStateReason = getKnownGameSourcesEmptyStateReason(
-    game.downloadSources
-  );
-  const downloadSourcesDependencyKey = Array.isArray(game.downloadSources)
-    ? game.downloadSources.join("|")
-    : "__unknown__";
   const [downloadOptions, setDownloadOptions] = useState<GameRepack[]>([]);
   const [localDownloadSources, setLocalDownloadSources] = useState<
     DownloadSource[]
   >([]);
   const [isCheckingSources, setIsCheckingSources] = useState(
-    shouldLoadDownloadOptions && knownGameSourcesEmptyStateReason === null
+    shouldLoadDownloadOptions
   );
-  const [isLoading, setIsLoading] = useState(
-    shouldLoadDownloadOptions && knownGameSourcesEmptyStateReason === null
-  );
+  const [isLoading, setIsLoading] = useState(shouldLoadDownloadOptions);
   const [emptyStateReason, setEmptyStateReason] =
-    useState<DownloadOptionsEmptyStateReason | null>(
-      shouldLoadDownloadOptions ? knownGameSourcesEmptyStateReason : null
-    );
+    useState<DownloadOptionsEmptyStateReason | null>(null);
 
   useEffect(() => {
     if (!shouldLoadDownloadOptions) {
@@ -228,40 +186,20 @@ export function useGameDownloadOptions(
       return;
     }
 
-    if (knownGameSourcesEmptyStateReason !== null) {
-      setDownloadOptions([]);
-      setLocalDownloadSources([]);
-      setIsCheckingSources(false);
-      setIsLoading(false);
-      setEmptyStateReason(knownGameSourcesEmptyStateReason);
-      return;
-    }
-
     const signal = { cancelled: false };
 
-    void fetchDownloadOptions(
-      game,
-      signal,
-      {
-        setDownloadOptions,
-        setLocalDownloadSources,
-        setIsCheckingSources,
-        setIsLoading,
-        setEmptyStateReason,
-      },
-      knownGameSourcesEmptyStateReason
-    );
+    void fetchDownloadOptions(game, signal, {
+      setDownloadOptions,
+      setLocalDownloadSources,
+      setIsCheckingSources,
+      setIsLoading,
+      setEmptyStateReason,
+    });
 
     return () => {
       signal.cancelled = true;
     };
-  }, [
-    downloadSourcesDependencyKey,
-    game.objectId,
-    game.shop,
-    knownGameSourcesEmptyStateReason,
-    shouldLoadDownloadOptions,
-  ]);
+  }, [game.objectId, game.shop, shouldLoadDownloadOptions]);
 
   return {
     downloadOptions,

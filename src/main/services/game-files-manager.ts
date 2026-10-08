@@ -21,6 +21,7 @@ import type {
 } from "@types";
 import axios from "axios";
 import createDesktopShortcut from "create-desktop-shortcuts";
+import { fileTypeFromFile } from "file-type";
 import fs from "node:fs";
 import path from "node:path";
 import pngToIco from "png-to-ico";
@@ -159,6 +160,46 @@ export class GameFilesManager {
     console.log(`handleProgress: ${progress.percent}% - ${progress.file}`);
     this.updateExtractionProgress(progress.percent / 100);
   };
+
+  private static isArchiveMimeType(mimeType: string | undefined): boolean {
+    if (!mimeType) return false;
+
+    const normalized = mimeType.toLowerCase();
+    return [
+      "application/zip",
+      "application/x-zip-compressed",
+      "application/x-7z-compressed",
+      "application/x-rar-compressed",
+      "application/vnd.rar",
+      "application/octet-stream",
+    ].includes(normalized);
+  }
+
+  async isArchiveFile(filePath: string): Promise<boolean> {
+    try {
+      const detected = await fileTypeFromFile(filePath);
+      if (!detected) return false;
+
+      if (FILE_EXTENSIONS_TO_EXTRACT.some((ext) => filePath.toLowerCase().endsWith(ext))) {
+        return true;
+      }
+
+      return GameFilesManager.isArchiveMimeType(detected.mime);
+    } catch {
+      return false;
+    }
+  }
+
+  private resolveExtractionPath(filePath: string): string {
+    const fileName = path.parse(filePath).name || "download";
+    const defaultPath = path.join(path.dirname(filePath), fileName);
+
+    if (defaultPath !== filePath) {
+      return defaultPath;
+    }
+
+    return path.join(path.dirname(filePath), `${fileName}-extracted`);
+  }
 
   async extractFilesInDirectory(directoryPath: string): Promise<boolean> {
     let pathType: Awaited<ReturnType<typeof getPathType>>;
@@ -828,10 +869,20 @@ export class GameFilesManager {
       return false;
     }
 
-    const extractionPath = path.join(
-      download.downloadPath,
-      path.parse(download.folderName!).name
-    );
+    if (download.status === "active") {
+      logger.warn(
+        `[GameFilesManager] Cannot extract while download is still active: ${filePath}`
+      );
+      return false;
+    }
+
+    const localFileSize = fs.statSync(filePath).size;
+    if (localFileSize <= 0) {
+      await this.failExtraction(new Error(`Archive file is empty: ${filePath}`));
+      return false;
+    }
+
+    const extractionPath = this.resolveExtractionPath(filePath);
 
     this.updateExtractionProgress(0, true);
 

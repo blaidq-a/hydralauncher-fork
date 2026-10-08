@@ -1,6 +1,7 @@
 import { downloadsSublevel, levelKeys } from "@main/level";
 import { registerEvent } from "../register-event";
 import { DownloadManager, WindowManager } from "@main/services";
+import { Downloader } from "@shared";
 import type { GameShop } from "@types";
 
 const pauseGameSeed = async (
@@ -11,7 +12,7 @@ const pauseGameSeed = async (
   const downloadKey = levelKeys.game(shop, objectId);
   const download = await downloadsSublevel.get(downloadKey);
 
-  if (!download) return;
+  if (!download || download.downloader !== Downloader.Torrent) return;
 
   await downloadsSublevel.put(downloadKey, {
     ...download,

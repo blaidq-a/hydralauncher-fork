@@ -96,8 +96,6 @@ if (process.defaultApp) {
 }
 
 const initializeApp = async () => {
-  electronApp.setAppUserModelId("gg.hydralauncher.hydra");
-  app.name = "Hydra";
   refreshPortableShortcutLauncher();
 
   logger.info("Crash dumps directory", app.getPath("crashDumps"));
@@ -235,6 +233,10 @@ const initializeApp = async () => {
     logger.error("[InitializeApp] Failed to start UpdateManager", error);
   }
 };
+
+app.setName("Hydra");
+app.name = "Hydra";
+electronApp.setAppUserModelId("gg.hydralauncher.hydra");
 
 app.on("browser-window-created", (_, window) => {
   optimizer.watchWindowShortcuts(window);

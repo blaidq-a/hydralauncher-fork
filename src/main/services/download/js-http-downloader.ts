@@ -5,7 +5,7 @@ import https from "node:https";
 import { Readable, Transform, Writable, type Duplex } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import axios, { type AxiosResponse } from "axios";
-import { logger } from "../logger";
+import { logger } from "../logger.js";
 import {
   areDownloadByteRangesComplete,
   areDownloadByteRangesContiguous,
@@ -14,6 +14,7 @@ import {
   computeFileSize,
   createDownloadByteRanges,
   createPositionalWriteStream,
+  isDownloadCompleteOnDisk,
   isRetryableDownloadError,
   isRetryableHttpStatus,
   MAX_BUDGET_RESETS,
@@ -29,7 +30,7 @@ import {
   shouldResetRetryBudget,
   splitDownloadByteRange,
   stallDetected,
-} from "./js-http-downloader-helpers";
+} from "./js-http-downloader-helpers.js";
 
 export interface JsHttpDownloaderStatus {
   folderName: string;
@@ -65,9 +66,9 @@ const STALL_CHECK_INTERVAL_MS = 2000;
 const RECONNECT_RETRY_DELAY_MS = 500;
 const RANGE_PROBE_TIMEOUT_MS = 15000;
 const DOWNLOAD_BUFFER_SIZE = 512 * 1024; // Reduced from 1MB to 512KB for lower memory footprint
-const SEGMENT_STALL_TIMEOUT_MS = 5000;
+const SEGMENT_STALL_TIMEOUT_MS = 25000;
 const SEGMENT_CHECKPOINT_INTERVAL_MS = 5000;
-const SEGMENT_RETRY_LIMIT = 5;
+const SEGMENT_RETRY_LIMIT = 8;
 const SEGMENT_RETRY_BACKOFF_MS = 500;
 
 class DownloadHttpAgent extends http.Agent {
@@ -126,6 +127,39 @@ function getAxiosHeader(
 
 export const DEFAULT_DOWNLOAD_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:144.0) Gecko/20100101 Firefox/144.0";
+const MEGADB_REFERER = "https://steamrip.com/";
+
+function applyMegaDBReferer(
+  url: string,
+  headers: Record<string, string>
+): Record<string, string> {
+  let hostname: string | undefined;
+
+  try {
+    hostname = new URL(url).hostname.toLowerCase();
+  } catch {
+    return headers;
+  }
+
+  const isMegaDBUrl =
+    hostname === "megadb.net" ||
+    hostname === "megadb.xyz" ||
+    hostname.endsWith(".megadb.net") ||
+    hostname.endsWith(".megadb.xyz");
+
+  if (!isMegaDBUrl) return headers;
+
+  const hasReferer = Object.keys(headers).some(
+    (key) => key.toLowerCase() === "referer"
+  );
+
+  if (hasReferer) return headers;
+
+  return {
+    ...headers,
+    Referer: MEGADB_REFERER,
+  };
+}
 
 class HttpDownloadStatusError extends Error {
   constructor(
@@ -159,11 +193,36 @@ interface SegmentedDownloadCheckpoint {
   lastModified: string | null;
 }
 
+type SegmentedDownloadResult =
+  | { kind: "complete" }
+  | { kind: "fallback"; resumeByte: number }
+  | { kind: "unsupported" };
+
 interface ActiveSegmentedDownload extends SegmentedDownloadCheckpoint {
   targetPath: string;
   checkpointPath: string;
   lastCheckpointAt: number;
 }
+
+const getContiguousSegmentedBytes = (
+  checkpoint: SegmentedDownloadCheckpoint
+): number => {
+  const ranges = checkpoint.ranges
+    .map((range, index) => ({
+      ...range,
+      offset: checkpoint.offsets[index] ?? 0,
+    }))
+    .sort((left, right) => left.start - right.start);
+  let contiguousBytes = 0;
+
+  for (const range of ranges) {
+    if (range.start > contiguousBytes) break;
+    const rangeEnd = Math.min(range.end + 1, range.start + range.offset);
+    contiguousBytes = Math.max(contiguousBytes, rangeEnd);
+  }
+
+  return contiguousBytes;
+};
 
 function isDownloadByteRange(
   value: unknown
@@ -219,6 +278,7 @@ export class JsHttpDownloader {
   private isRecovering = false;
   private isSegmented = false;
   private isMerging = false;
+  private singleConnectionRequiredUrls = new Set<string>();
   private recoverBytesTotal = 0;
   private recoverBytesDone = 0;
   private recoverSpeedLastUpdate = Date.now();
@@ -294,7 +354,11 @@ export class JsHttpDownloader {
           filename,
           url
         );
-        const requestHeaders = this.buildRequestHeaders(headers, startByte);
+        const requestHeaders = this.buildRequestHeaders(
+          url,
+          headers,
+          startByte
+        );
 
         this.startStallDetection();
 
@@ -567,10 +631,13 @@ export class JsHttpDownloader {
   }
 
   private buildRequestHeaders(
+    url: string,
     headers: Record<string, string>,
     startByte: number
   ): Record<string, string> {
-    const requestHeaders: Record<string, string> = { ...headers };
+    const requestHeaders: Record<string, string> = applyMegaDBReferer(url, {
+      ...headers,
+    });
 
     const hasUserAgentHeader = Object.keys(requestHeaders).some(
       (key) => key.toLowerCase() === "user-agent"
@@ -613,17 +680,6 @@ export class JsHttpDownloader {
     }
   }
 
-  private parseTotalSizeFrom416(response: Response): number | null {
-    const contentRange = response.headers.get("content-range");
-    if (!contentRange) return null;
-
-    const match = /bytes\s+\*\/(\d+)/i.exec(contentRange);
-    if (!match) return null;
-
-    const total = Number.parseInt(match[1], 10);
-    return Number.isFinite(total) && total > 0 ? total : null;
-  }
-
   private parseContentRangeStart(response: Response): number | null {
     const contentRange = response.headers.get("content-range");
     if (!contentRange) return null;
@@ -643,17 +699,30 @@ export class JsHttpDownloader {
     savePath: string,
     usedFallback: boolean
   ): Promise<void> {
-    if (
-      startByte === 0 &&
-      (await this.tryExecuteSegmentedDownload(
+    if (this.singleConnectionRequiredUrls.has(url)) {
+      logger.log(
+        `[JsHttpDownloader] URL has already failed segmented mode; forcing a single-connection download for ${url}`
+      );
+    } else if (startByte === 0) {
+      const segmentedResult = await this.tryExecuteSegmentedDownload(
         url,
         requestHeaders,
         filePath,
         savePath,
         usedFallback
-      ))
-    ) {
-      return;
+      );
+      if (segmentedResult.kind === "complete") return;
+      if (segmentedResult.kind === "fallback") {
+        startByte = segmentedResult.resumeByte;
+        requestHeaders = this.buildRequestHeaders(
+          url,
+          this.currentOptions?.headers ?? {},
+          startByte
+        );
+        this.bytesDownloaded = startByte;
+        this.resetSpeedTracking();
+        this.onProgress?.();
+      }
     }
 
     const response = await fetch(url, {
@@ -667,20 +736,42 @@ export class JsHttpDownloader {
       `[JsHttpDownloader] Response status=${response.status} content-type=${contentType} content-length=${contentLength}`
     );
 
+    const localFileSize = await fs.promises
+      .stat(filePath)
+      .then((stat) => stat.size)
+      .catch(() => -1);
+    const remoteTotalSize = computeFileSize({
+      status: response.status,
+      contentRange: response.headers.get("content-range"),
+      contentLength: response.headers.get("content-length"),
+      startByte,
+    });
+
+    if (
+      startByte > 0 &&
+      remoteTotalSize !== null &&
+      isDownloadCompleteOnDisk(localFileSize, remoteTotalSize)
+    ) {
+      this.fileSize = remoteTotalSize;
+      this.bytesDownloaded = remoteTotalSize;
+      this.status = "complete";
+      this.retryCount = 0;
+      this.downloadSpeed = 0;
+      this.isSegmented = false;
+      this.isMerging = false;
+      this.resetRecoveryState();
+
+      logger.log(
+        `[JsHttpDownloader] Resume validation passed: local file already matches remote size ${remoteTotalSize} bytes; skipping redundant re-download.`
+      );
+      return;
+    }
+
     if (response.status === 416 && startByte > 0) {
-      const remoteTotalSize = this.parseTotalSizeFrom416(response);
-
       if (remoteTotalSize !== null && startByte === remoteTotalSize) {
-        this.fileSize = remoteTotalSize;
-        this.bytesDownloaded = remoteTotalSize;
-        this.status = "complete";
-        this.retryCount = 0;
-        this.downloadSpeed = 0;
-
-        logger.log(
-          "[JsHttpDownloader] Range not satisfiable but local file already complete"
+        logger.warn(
+          `[JsHttpDownloader] Resume validation failed: local file size ${localFileSize} does not match remote size ${remoteTotalSize}; restarting from zero.`
         );
-        return;
       }
 
       throw new Error(
@@ -815,6 +906,7 @@ export class JsHttpDownloader {
     this.budgetResets = 0;
     this.restartCount = 0;
     this.isReconnecting = false;
+    this.singleConnectionRequiredUrls.delete(url);
     this.resetRecoveryState();
     this.downloadSpeed = 0;
     logger.log(
@@ -829,7 +921,14 @@ export class JsHttpDownloader {
     filePath: string,
     savePath: string,
     usedFallback: boolean
-  ): Promise<boolean> {
+  ): Promise<SegmentedDownloadResult> {
+    if (this.singleConnectionRequiredUrls.has(url)) {
+      logger.log(
+        `[JsHttpDownloader] Skipping segmented probe for ${url} because a prior segmented attempt failed`
+      );
+      return { kind: "unsupported" };
+    }
+
     const probeController = new AbortController();
     const parentSignal = this.abortController?.signal;
     const abortProbe = () => probeController.abort();
@@ -860,7 +959,7 @@ export class JsHttpDownloader {
         "[JsHttpDownloader] Range capability probe failed; falling back to a single connection",
         error
       );
-      return false;
+      return { kind: "unsupported" };
     } finally {
       clearTimeout(timeout);
       parentSignal?.removeEventListener("abort", abortProbe);
@@ -901,15 +1000,16 @@ export class JsHttpDownloader {
           parseRetryAfterMs(getAxiosHeader(probe, "retry-after"), Date.now())
         );
       }
-      return false;
+      return { kind: "unsupported" };
     }
 
     const maxConnections = Math.min(
       MAX_SEGMENTED_DOWNLOAD_CONNECTIONS,
       Math.max(
-        2,
+        SEGMENTED_DOWNLOAD_CONNECTIONS,
         Math.floor(
-          this.currentOptions?.maxConnections ?? SEGMENTED_DOWNLOAD_CONNECTIONS
+          this.currentOptions?.maxConnections ??
+            MAX_SEGMENTED_DOWNLOAD_CONNECTIONS
         )
       )
     );
@@ -962,7 +1062,7 @@ export class JsHttpDownloader {
     const ranges = canResumeCheckpoint
       ? savedCheckpoint.ranges.map((range) => ({ ...range }))
       : initialRanges;
-    if (ranges.length < 2) return false;
+    if (ranges.length < 2) return { kind: "unsupported" };
 
     let offsets =
       canResumeCheckpoint && savedCheckpoint
@@ -993,16 +1093,10 @@ export class JsHttpDownloader {
     try {
       targetStats = targetExists ? await targetHandle.stat() : null;
       const validExistingData = canResumeCheckpoint && targetStats !== null;
-      
-      // If file is already complete or near-complete, mark as done immediately
-      if (targetStats && targetStats.size >= fileSize * 0.999) {
-        logger.log(
-          `[JsHttpDownloader] Target file already ${(targetStats.size / fileSize * 100).toFixed(2)}% complete; marking all segments complete`
-        );
-        // Mark all segments as complete
-        offsets = ranges.map((range) => range.end - range.start + 1);
-        // Persist this state immediately before proceeding
-      } else if (!validExistingData) {
+
+      // The target is preallocated to fileSize, so its size says nothing about
+      // how much was actually written; only the checkpoint offsets are reliable.
+      if (!validExistingData) {
         offsets = ranges.map(() => 0);
       }
       // Extend a short partial in place; never discard existing download bytes.
@@ -1051,34 +1145,23 @@ export class JsHttpDownloader {
     );
 
     let completed = false;
+    let fallbackToSingleConnection = false;
+    let fallbackResumeByte = 0;
     try {
       await this.persistSegmentedCheckpoint(checkpoint);
-      
-      // Check if download is already near-complete before attempting segment download
-      const downloadedSoFar = offsets.reduce((total, offset) => total + offset, 0);
-      if (downloadedSoFar >= fileSize * 0.999) {
-        logger.log(
-          `[JsHttpDownloader] Download already ${(downloadedSoFar / fileSize * 100).toFixed(2)}% complete; skipping segment download loop and finalizing`
-        );
-        // Mark all segments as complete
-        checkpoint.offsets = ranges.map((range) => range.end - range.start + 1);
-        await this.persistSegmentedCheckpoint(checkpoint, true);
-      } else {
-        // Only run segment download if significant bytes are still needed
-        await this.downloadSegmentsWithFallback({
-          url,
-          requestHeaders,
-          fileSize,
-          ranges,
-          checkpoint,
-          targetHandle,
-          controller: segmentController,
-          maxConnections,
-        });
+      await this.downloadSegmentsWithFallback({
+        url,
+        requestHeaders,
+        fileSize,
+        ranges,
+        checkpoint,
+        targetHandle,
+        controller: segmentController,
+        maxConnections,
+      });
 
-        await this.persistSegmentedCheckpoint(checkpoint, true);
-      }
-      
+      await this.persistSegmentedCheckpoint(checkpoint, true);
+
       // Verify all byte ranges are truly complete before declaring success
       const allSegmentsComplete = ranges.every((range, idx) => {
         const expected = range.end - range.start + 1;
@@ -1091,13 +1174,13 @@ export class JsHttpDownloader {
         }
         return true;
       });
-      
+
       if (!allSegmentsComplete) {
         throw new Error(
           "Segmented download ended but some segments are incomplete."
         );
       }
-      
+
       if (
         !areDownloadByteRangesComplete(ranges, checkpoint.offsets, fileSize)
       ) {
@@ -1105,7 +1188,7 @@ export class JsHttpDownloader {
           "Segmented download ended before all target-file byte ranges were written."
         );
       }
-      
+
       // Verify actual file size before finalizing
       const finalStat = await targetHandle.stat();
       if (finalStat.size < fileSize) {
@@ -1113,7 +1196,7 @@ export class JsHttpDownloader {
           `Target file incomplete: ${finalStat.size}/${fileSize} bytes. Resuming would be needed.`
         );
       }
-      
+
       await targetHandle.truncate(fileSize);
       if (this.checkpointTimer) {
         clearTimeout(this.checkpointTimer);
@@ -1128,6 +1211,7 @@ export class JsHttpDownloader {
       this.restartCount = 0;
       this.isReconnecting = false;
       this.isMerging = false;
+      this.singleConnectionRequiredUrls.delete(url);
       this.resetRecoveryState();
       this.bytesDownloaded = fileSize;
       this.downloadSpeed = 0;
@@ -1136,7 +1220,30 @@ export class JsHttpDownloader {
       logger.log(
         `[JsHttpDownloader] Segmented download completed directly in the target file (${this.bytesDownloaded} bytes)`
       );
-      return true;
+      return { kind: "complete" };
+    } catch (error) {
+      const wasUserAborted =
+        this.isPaused || (this.abortController?.signal?.aborted ?? false);
+
+      if (wasUserAborted) {
+        logger.log(
+          "[JsHttpDownloader] Segmented download was paused; preserving the partial file and checkpoint for resume."
+        );
+        throw error;
+      }
+
+      logger.warn(
+        "[JsHttpDownloader] Segmented download was unreliable; resuming with a single connection from the contiguous downloaded prefix.",
+        error
+      );
+      this.singleConnectionRequiredUrls.add(url);
+      this.segmentedDownload = null;
+      this.isSegmented = false;
+      this.isMerging = false;
+      fallbackToSingleConnection = true;
+      fallbackResumeByte = getContiguousSegmentedBytes(checkpoint);
+
+      return { kind: "fallback", resumeByte: fallbackResumeByte };
     } finally {
       parentSignal?.removeEventListener("abort", abortSegments);
       this.isMerging = false;
@@ -1161,6 +1268,14 @@ export class JsHttpDownloader {
             fs.promises.rm(targetPath, { force: true }),
             fs.promises.rm(checkpointPath, { force: true }),
           ]);
+        }
+        if (fallbackToSingleConnection) {
+          await fs.promises.truncate(targetPath, fallbackResumeByte);
+          await fs.promises.rm(checkpointPath, { force: true });
+          this.fileSize = fileSize;
+          this.bytesDownloaded = fallbackResumeByte;
+          this.resetSpeedTracking();
+          this.onProgress?.();
         }
         if (completed) {
           this.isSegmented = false;
@@ -1214,7 +1329,11 @@ export class JsHttpDownloader {
     const pendingSegments = ranges.map((_range, index) => index);
     const activeSegmentControllers = new Map<number, AbortController>();
     const splitRequestedSegments = new Set<number>();
-    let concurrency = Math.min(maxConnections, ranges.length);
+    let concurrency = Math.min(
+      SEGMENTED_DOWNLOAD_CONNECTIONS,
+      maxConnections,
+      ranges.length
+    );
     let activeRequests = 0;
     let scheduledRetries = 0;
     let failure: Error | null = null;
@@ -1310,6 +1429,23 @@ export class JsHttpDownloader {
             segmentCount: ranges.length,
             signal: segmentController.signal,
           })
+            .then(() => {
+              if (
+                failure ||
+                splitRequestedSegments.has(segmentIndex) ||
+                controller.signal.aborted
+              ) {
+                return;
+              }
+
+              const nextConcurrency = Math.min(maxConnections, concurrency + 1);
+              if (nextConcurrency > concurrency) {
+                concurrency = nextConcurrency;
+                logger.info(
+                  `[JsHttpDownloader] Increasing segmented download concurrency to ${concurrency}/${maxConnections} after a successful range`
+                );
+              }
+            })
             .catch((error: unknown) => {
               if (splitRequestedSegments.has(segmentIndex)) return;
               if (failure) return;
@@ -1331,7 +1467,10 @@ export class JsHttpDownloader {
               }
 
               retryCounts[segmentIndex] += 1;
-              concurrency = Math.max(1, Math.floor(concurrency / 2));
+              concurrency = Math.max(
+                SEGMENTED_DOWNLOAD_CONNECTIONS,
+                Math.floor(concurrency / 2)
+              );
               const backoffMs = Math.min(
                 SEGMENT_RETRY_BACKOFF_MS * 2 ** (retryCounts[segmentIndex] - 1),
                 8000
@@ -1368,13 +1507,23 @@ export class JsHttpDownloader {
                 );
                 if (splitRanges) {
                   const [leftRange, rightRange] = splitRanges;
-                  ranges[segmentIndex] = leftRange;
-                  checkpoint.ranges[segmentIndex] = leftRange;
-                  ranges.push(rightRange);
-                  checkpoint.ranges.push(rightRange);
-                  checkpoint.offsets.push(0);
-                  retryCounts.push(0);
+                  const rightIndex = segmentIndex + 1;
+                  ranges.splice(segmentIndex, 1, leftRange, rightRange);
+                  checkpoint.ranges.splice(
+                    segmentIndex,
+                    1,
+                    leftRange,
+                    rightRange
+                  );
+                  checkpoint.offsets.splice(
+                    segmentIndex,
+                    1,
+                    checkpoint.offsets[segmentIndex],
+                    0
+                  );
+                  retryCounts.splice(segmentIndex, 1, 0, 0);
                   checkpoint.segmentCount = ranges.length;
+                  pendingSegments.unshift(rightIndex);
                   logger.log(
                     `[JsHttpDownloader] Split remaining segment ${segmentIndex + 1} at byte ${rightRange.start} to keep an idle connection working`
                   );
@@ -1470,14 +1619,14 @@ export class JsHttpDownloader {
       cleanupAttempt();
       if (timedOut) {
         throw new SegmentDownloadError(
-          `Range segment ${segmentIndex + 1}/${segmentCount} stalled for 5 seconds before receiving data.`,
+          `Range segment ${segmentIndex + 1}/${segmentCount} stalled for ${Math.round(SEGMENT_STALL_TIMEOUT_MS / 1000)} seconds before receiving data.`,
           true
         );
       }
       throw error;
     }
 
-    if (segmentResponse.status !== 206) {
+    if (segmentResponse.status !== 206 && segmentResponse.status !== 200) {
       const retryable =
         segmentResponse.status === 429 || segmentResponse.status >= 500;
       const retryAfterMs = parseRetryAfterMs(
@@ -1503,8 +1652,12 @@ export class JsHttpDownloader {
       getAxiosHeader(segmentResponse, "content-type") ?? "";
     const segmentContentEncoding =
       getAxiosHeader(segmentResponse, "content-encoding") ?? "";
+    const rangeIgnoredByServer = segmentResponse.status === 200;
+    const hasExpectedRangeResponse =
+      segmentResponse.status === 206 &&
+      expectedContentRange.test(actualContentRange);
     if (
-      !expectedContentRange.test(actualContentRange) ||
+      (!rangeIgnoredByServer && !hasExpectedRangeResponse) ||
       segmentContentType.toLowerCase().includes("text/html") ||
       segmentContentType.toLowerCase().includes("application/xhtml") ||
       (segmentContentEncoding &&
@@ -1518,61 +1671,85 @@ export class JsHttpDownloader {
       );
     }
 
-    let segmentBytesWritten = 0;
     const writeStream = createPositionalWriteStream(
       targetHandle,
       range.start + existingBytes,
       DOWNLOAD_BUFFER_SIZE,
       async (writtenBytes) => {
-        // Track bytes written for this segment only; don't update checkpoint.offsets yet
-        segmentBytesWritten += writtenBytes;
+        checkpoint.offsets[segmentIndex] += writtenBytes;
         this.bytesDownloaded += writtenBytes;
         this.updateSpeed();
         this.onProgress?.();
-        // Checkpoint persistence is time-based; avoid per-byte I/O overhead
       },
       attemptController.signal
     );
     this.segmentedWriteStreams.add(writeStream);
     try {
-      await pipeline(
-        this.createReadableStream(
-          Readable.toWeb(
-            segmentResponse.data
-          ).getReader() as ReadableStreamDefaultReader<Uint8Array>,
-          0,
-          false,
-          resetInactivityTimer
-        ),
-        this.createDownloadBufferStream(),
-        writeStream,
-        { signal: attemptController.signal }
+      const responseBodyStream = this.createReadableStream(
+        Readable.toWeb(
+          segmentResponse.data
+        ).getReader() as ReadableStreamDefaultReader<Uint8Array>,
+        rangeIgnoredByServer ? requestStart : 0,
+        false,
+        resetInactivityTimer
       );
-      
-      // Update checkpoint offsets AFTER segment write is fully complete
-      // Clamp to expected size to avoid buffer padding overage
-      checkpoint.offsets[segmentIndex] = Math.min(segmentBytesWritten, expectedSegmentSize);
-      
-      // Validate segment completion with exact byte count
-      const segmentSize = checkpoint.offsets[segmentIndex];
-      const segmentExpected = expectedSegmentSize;
-      
-      if (segmentSize !== segmentExpected) {
-        logger.error(
-          `[JsHttpDownloader] Segment ${segmentIndex + 1}/${segmentCount}: received ${segmentSize} bytes, expected ${segmentExpected} bytes`
+
+      let remainingBytesToWrite = expectedSegmentSize - existingBytes;
+      const rangeGuard = new Transform({
+        transform(chunk, _encoding, callback) {
+          if (remainingBytesToWrite <= 0) {
+            callback();
+            return;
+          }
+
+          const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          const writableBytes = Math.min(buffer.length, remainingBytesToWrite);
+          if (writableBytes > 0) {
+            this.push(buffer.subarray(0, writableBytes));
+            remainingBytesToWrite -= writableBytes;
+          }
+          callback();
+        },
+      });
+
+      if (rangeIgnoredByServer) {
+        await pipeline(
+          responseBodyStream,
+          rangeGuard,
+          this.createDownloadBufferStream(),
+          writeStream,
+          { signal: attemptController.signal }
         );
+      } else {
+        await pipeline(
+          responseBodyStream,
+          this.createDownloadBufferStream(),
+          writeStream,
+          { signal: attemptController.signal }
+        );
+      }
+
+      // Clamp to expected size if minor buffer padding overage
+      if (checkpoint.offsets[segmentIndex] > expectedSegmentSize) {
+        const excess = checkpoint.offsets[segmentIndex] - expectedSegmentSize;
+        this.bytesDownloaded = Math.max(0, this.bytesDownloaded - excess);
+        checkpoint.offsets[segmentIndex] = expectedSegmentSize;
+      }
+
+      // Check if segment is truly complete
+      if (checkpoint.offsets[segmentIndex] < expectedSegmentSize) {
         throw new SegmentDownloadError(
-          `Range segment ${segmentIndex + 1}/${segmentCount} size mismatch (${segmentSize}/${segmentExpected} bytes).`,
+          `Range segment ${segmentIndex + 1}/${segmentCount} stream ended prematurely (${checkpoint.offsets[segmentIndex]}/${expectedSegmentSize} bytes).`,
           true
         );
       }
-      
+
       // Persist checkpoint after successful segment completion
       await this.persistSegmentedCheckpoint(checkpoint);
     } catch (error) {
       if (timedOut) {
         throw new SegmentDownloadError(
-          `Range segment ${segmentIndex + 1}/${segmentCount} stalled for 5 seconds; retrying from its last saved offset.`,
+          `Range segment ${segmentIndex + 1}/${segmentCount} stalled for ${Math.round(SEGMENT_STALL_TIMEOUT_MS / 1000)} seconds; retrying from its last saved offset.`,
           true
         );
       }
@@ -1591,6 +1768,7 @@ export class JsHttpDownloader {
       const content = await fs.promises.readFile(checkpointPath, "utf8");
       const parsed: unknown = JSON.parse(content);
       if (!this.isSegmentedCheckpoint(parsed)) {
+        await fs.promises.rm(checkpointPath, { force: true });
         throw new Error("Invalid segmented download checkpoint format.");
       }
 
@@ -1707,11 +1885,9 @@ export class JsHttpDownloader {
         etag: checkpoint.etag,
         lastModified: checkpoint.lastModified,
       };
-      fs.writeFileSync(
-        checkpoint.checkpointPath,
-        JSON.stringify(serialized),
-        "utf8"
-      );
+      const tempPath = `${checkpoint.checkpointPath}.tmp`;
+      fs.writeFileSync(tempPath, JSON.stringify(serialized), "utf8");
+      fs.renameSync(tempPath, checkpoint.checkpointPath);
       checkpoint.lastCheckpointAt = Date.now();
     };
 
@@ -1971,14 +2147,14 @@ export class JsHttpDownloader {
     if (!this.currentOptions) {
       throw new Error("No download options available for resume");
     }
-    
+
     // Force persist any pending checkpoint before resuming
     if (this.segmentedDownload && this.checkpointTimer) {
       clearTimeout(this.checkpointTimer);
       this.checkpointTimer = null;
       await this.persistSegmentedCheckpoint(this.segmentedDownload, true);
     }
-    
+
     this.isDownloading = false;
     this.isPaused = false;
     this.retryCount = 0;

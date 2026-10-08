@@ -7,21 +7,33 @@ import { pipeline } from "node:stream/promises";
 import { describe, it } from "node:test";
 import {
   areDownloadByteRangesComplete,
+  areDownloadByteRangesContiguous,
   createDownloadByteRanges,
   createPositionalWriteStream,
+  isDownloadCompleteOnDisk,
   MAX_SEGMENTED_DOWNLOAD_CONNECTIONS,
   MAX_SEGMENT_RANGE_BYTES,
   SEGMENTED_DOWNLOAD_CONNECTIONS,
   splitDownloadByteRange,
 } from "./js-http-downloader-helpers.ts";
 
+describe("isDownloadCompleteOnDisk", () => {
+  it("requires the local file to reach the expected byte count before extraction", () => {
+    assert.equal(isDownloadCompleteOnDisk(1024, 1024), true);
+    assert.equal(isDownloadCompleteOnDisk(1023, 1024), false);
+    assert.equal(isDownloadCompleteOnDisk(0, 100), false);
+    assert.equal(isDownloadCompleteOnDisk(10, null), true);
+    assert.equal(isDownloadCompleteOnDisk(0, null), false);
+  });
+});
+
 describe("createDownloadByteRanges", () => {
-  it("uses eight connections for segmented downloads", () => {
-    assert.equal(SEGMENTED_DOWNLOAD_CONNECTIONS, 8);
-    assert.equal(MAX_SEGMENTED_DOWNLOAD_CONNECTIONS, 12);
+  it("uses at least ten and at most twenty connections for segmented downloads", () => {
+    assert.equal(SEGMENTED_DOWNLOAD_CONNECTIONS, 10);
+    assert.equal(MAX_SEGMENTED_DOWNLOAD_CONNECTIONS, 20);
   });
 
-  it("supports a maximum of twelve byte ranges", () => {
+  it("supports a maximum of twenty byte ranges", () => {
     assert.equal(
       createDownloadByteRanges(12_000, MAX_SEGMENTED_DOWNLOAD_CONNECTIONS)
         .length,
@@ -108,6 +120,30 @@ describe("createDownloadByteRanges", () => {
     );
   });
 
+  it("keeps dynamically split segments contiguous and resume-safe", () => {
+    const ranges = [
+      { start: 0, end: 999 },
+      { start: 1000, end: 1999 },
+      { start: 2000, end: 2999 },
+    ];
+    const offsets = [250, 0, 0];
+    const split = splitDownloadByteRange(ranges[0], offsets[0], 100);
+
+    assert.ok(split);
+    const [leftRange, rightRange] = split;
+    ranges.splice(0, 1, leftRange, rightRange);
+    offsets.splice(0, 1, offsets[0], 0);
+
+    assert.ok(areDownloadByteRangesContiguous(ranges, 3000));
+    assert.deepEqual(ranges, [
+      { start: 0, end: 499 },
+      { start: 500, end: 999 },
+      { start: 1000, end: 1999 },
+      { start: 2000, end: 2999 },
+    ]);
+    assert.deepEqual(offsets, [250, 0, 0, 0]);
+  });
+
   it("rejects invalid sizes and connection counts", () => {
     assert.deepEqual(createDownloadByteRanges(0), []);
     assert.deepEqual(createDownloadByteRanges(-1), []);
@@ -157,5 +193,95 @@ describe("createDownloadByteRanges", () => {
       await fileHandle.close();
       await fs.rm(temporaryDirectory, { recursive: true, force: true });
     }
+  });
+
+  it("simulates segmented download resume across multiple ranges without data corruption", async () => {
+    const temporaryDirectory = await fs.mkdtemp(
+      path.join(os.tmpdir(), "hydra-segmented-sim-")
+    );
+    const targetPath = path.join(temporaryDirectory, "game.bin");
+    const totalFileSize = 100 * 1024; // 100 KB
+    const expectedData = Buffer.alloc(totalFileSize);
+    for (let i = 0; i < totalFileSize; i++) {
+      expectedData[i] = (i * 31) % 256;
+    }
+
+    // Preallocate target file as in real segmented download
+    const targetHandle = await fs.open(targetPath, "w+");
+    await targetHandle.truncate(totalFileSize);
+
+    const ranges = createDownloadByteRanges(totalFileSize, 4);
+    const offsets = ranges.map(() => 0);
+
+    // Simulate downloading segment 0 partially, then interrupting
+    const seg0Range = ranges[0];
+    const seg0Total = seg0Range.end - seg0Range.start + 1;
+    const seg0Part1Len = Math.floor(seg0Total / 2);
+
+    const abortController1 = new AbortController();
+    await pipeline(
+      Readable.from([
+        expectedData.subarray(seg0Range.start, seg0Range.start + seg0Part1Len),
+      ]),
+      createPositionalWriteStream(
+        targetHandle,
+        seg0Range.start + offsets[0],
+        4096,
+        async (bytes) => {
+          offsets[0] += bytes;
+        },
+        abortController1.signal
+      )
+    );
+
+    assert.equal(offsets[0], seg0Part1Len);
+
+    // Simulate resume of segment 0 from its saved offset
+    const seg0Part2Len = seg0Total - offsets[0];
+    const abortController2 = new AbortController();
+    await pipeline(
+      Readable.from([
+        expectedData.subarray(
+          seg0Range.start + offsets[0],
+          seg0Range.start + offsets[0] + seg0Part2Len
+        ),
+      ]),
+      createPositionalWriteStream(
+        targetHandle,
+        seg0Range.start + offsets[0],
+        4096,
+        async (bytes) => {
+          offsets[0] += bytes;
+        },
+        abortController2.signal
+      )
+    );
+
+    assert.equal(offsets[0], seg0Total);
+
+    // Download remaining segments 1, 2, 3 completely
+    for (let idx = 1; idx < ranges.length; idx++) {
+      const range = ranges[idx];
+      await pipeline(
+        Readable.from([expectedData.subarray(range.start, range.end + 1)]),
+        createPositionalWriteStream(
+          targetHandle,
+          range.start + offsets[idx],
+          4096,
+          async (bytes) => {
+            offsets[idx] += bytes;
+          },
+          new AbortController().signal
+        )
+      );
+    }
+
+    assert.ok(areDownloadByteRangesComplete(ranges, offsets, totalFileSize));
+
+    await targetHandle.close();
+    const diskData = await fs.readFile(targetPath);
+    assert.equal(Buffer.compare(diskData, expectedData), 0);
+
+    await fs.rm(temporaryDirectory, { recursive: true, force: true });
   });
 });

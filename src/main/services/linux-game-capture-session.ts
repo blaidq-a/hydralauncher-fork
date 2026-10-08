@@ -36,6 +36,7 @@ const destroyCaptureWindow = (captureWindow: BrowserWindow | null) => {
 
 const createCaptureWindow = async (sourceId: string) => {
   const captureWindow = new BrowserWindow({
+    title: "Hydra",
     show: false,
     webPreferences: {
       backgroundThrottling: false,

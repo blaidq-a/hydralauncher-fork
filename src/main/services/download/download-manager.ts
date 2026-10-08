@@ -95,6 +95,7 @@ interface AllDebridBatchState {
 export class DownloadManager {
   private static downloadingGameId: string | null = null;
   private static jsDownloader: JsHttpDownloader | null = null;
+  private static jsDownloaderDownloadId: string | null = null;
   private static usingJsDownloader = false;
   private static isPreparingDownload = false;
   private static allDebridBatch: AllDebridBatchState | null = null;
@@ -666,16 +667,21 @@ export class DownloadManager {
     this.sendProgressUpdate(progress, status, game);
 
     if (
-      !status.isSegmented &&
       shouldFinalizeDownload({
         usingJsDownloader: this.usingJsDownloader,
         isCheckingFiles: status.isCheckingFiles,
         isDownloadingMetadata: status.isDownloadingMetadata,
         progress,
-        downloadStatus: download.status,
+        downloadStatus:
+          status.download.status === "complete" ? "complete" : download.status,
       })
     ) {
-      if (this.finalizingDownloads.has(gameId)) return;
+      if (
+        this.finalizingDownloads.has(gameId) ||
+        this.downloadingGameId !== gameId
+      ) {
+        return;
+      }
       this.finalizingDownloads.add(gameId);
       try {
         await this.handleDownloadCompletion(download, game, gameId);
@@ -848,10 +854,16 @@ export class DownloadManager {
       { valueEncoding: "json" }
     );
 
+    const shouldExtract =
+      download.automaticallyExtract ??
+      userPreferences?.extractFilesByDefault ??
+      false;
+
     const shouldSeed = await this.updateDownloadStatus(
       download,
       gameId,
-      userPreferences?.seedAfterDownloadComplete
+      userPreferences?.seedAfterDownloadComplete,
+      shouldExtract
     );
 
     // Calculate installer size in background
@@ -874,7 +886,7 @@ export class DownloadManager {
 
     // Always trigger extraction immediately if auto-extract is enabled
     // Don't pause for seeding first; extraction can run in parallel or after seeding
-    if (download.automaticallyExtract) {
+    if (shouldExtract) {
       const shouldPauseSeedingForExtraction =
         shouldSeed && download.downloader === Downloader.Torrent;
 
@@ -905,9 +917,9 @@ export class DownloadManager {
   private static async updateDownloadStatus(
     download: Download,
     gameId: string,
-    shouldSeed?: boolean
+    shouldSeed?: boolean,
+    shouldExtract = download.automaticallyExtract
   ): Promise<boolean> {
-    const shouldExtract = download.automaticallyExtract;
     const isSelectiveTorrent =
       download.downloader === Downloader.Torrent &&
       Array.isArray(download.fileIndices) &&
@@ -947,8 +959,14 @@ export class DownloadManager {
 
   private static async handleExtraction(download: Download, game: Game) {
     const gameFilesManager = new GameFilesManager(game.shop, game.objectId);
-    const extractionPath = download.folderName
-      ? path.join(download.downloadPath, download.folderName)
+    const freshDownload =
+      (await downloadsSublevel
+        .get(levelKeys.game(game.shop, game.objectId))
+        .catch(() => null)) ?? download;
+
+    const folderName = freshDownload.folderName ?? download.folderName;
+    const extractionPath = folderName
+      ? path.join(download.downloadPath, folderName)
       : null;
 
     if (!extractionPath || !fs.existsSync(extractionPath)) {
@@ -968,7 +986,7 @@ export class DownloadManager {
     if (
       extractionStats.isFile() &&
       FILE_EXTENSIONS_TO_EXTRACT.some((ext) =>
-        download.folderName?.toLowerCase().endsWith(ext)
+        folderName?.toLowerCase().endsWith(ext)
       )
     ) {
       await gameFilesManager.extractDownloadedFile().catch((error) => {
@@ -1079,6 +1097,7 @@ export class DownloadManager {
       this.downloadingGameId = null;
       this.usingJsDownloader = false;
       this.jsDownloader = null;
+      this.jsDownloaderDownloadId = null;
       this.allDebridBatch = null;
     }
   }
@@ -1116,6 +1135,7 @@ export class DownloadManager {
     this.isPreparingDownload = false;
     this.usingJsDownloader = false;
     this.jsDownloader = null;
+    this.jsDownloaderDownloadId = null;
     this.allDebridBatch = null;
     WindowManager.mainWindow?.setProgressBar(-1);
     WindowManager.sendToAppWindows("on-download-progress", null);
@@ -1225,33 +1245,58 @@ export class DownloadManager {
     return this.startDownload(download);
   }
 
-  static async cancelDownload(downloadKey = this.downloadingGameId) {
+  static async cancelDownload(
+    downloadKey = this.downloadingGameId,
+    download?: Pick<Download, "downloader" | "downloadPath" | "folderName">
+  ) {
     const isActiveDownload = downloadKey === this.downloadingGameId;
+    const isHttpDownload = download
+      ? this.isHttpDownloader(download.downloader)
+      : isActiveDownload && this.usingJsDownloader;
 
     if (isActiveDownload) {
       // Invalidate any in-flight startDownload preparation for this slot so a
       // late-resolving prepare cannot spawn a downloader after cancellation.
       this.startGeneration += 1;
+    }
 
-      if (this.usingJsDownloader && this.jsDownloader) {
+    if (isHttpDownload) {
+      const jsDownloader = this.jsDownloader;
+      const isMatchingJsDownload =
+        downloadKey !== null &&
+        this.jsDownloaderDownloadId === downloadKey &&
+        jsDownloader !== null;
+
+      if (isMatchingJsDownload) {
         logger.log("[DownloadManager] Cancelling JS download");
-        await this.jsDownloader.cancelDownload();
+        await jsDownloader.cancelDownload();
         this.jsDownloader = null;
-        this.usingJsDownloader = false;
-        this.allDebridBatch = null;
-      } else {
-        await TorrentService.call("action", {
-          action: "cancel",
-          game_id: downloadKey,
-        }).catch((err) => logger.error("Failed to cancel game download", err));
+        this.jsDownloaderDownloadId = null;
+      } else if (
+        !isActiveDownload &&
+        download?.folderName &&
+        downloadKey !== null
+      ) {
+        const filePath = path.join(download.downloadPath, download.folderName);
+        await Promise.all([
+          fs.promises.rm(filePath, { force: true }),
+          fs.promises.rm(`${filePath}.hydra-segments.json`, { force: true }),
+        ]);
       }
 
-      WindowManager.mainWindow?.setProgressBar(-1);
-      WindowManager.sendToAppWindows("on-download-progress", null);
-      this.downloadingGameId = null;
-      this.isPreparingDownload = false;
-      this.usingJsDownloader = false;
-      this.allDebridBatch = null;
+      if (isActiveDownload) {
+        this.usingJsDownloader = false;
+        this.allDebridBatch = null;
+        this.jsDownloader = null;
+        this.jsDownloaderDownloadId = null;
+      }
+
+      if (isActiveDownload) {
+        WindowManager.mainWindow?.setProgressBar(-1);
+        WindowManager.sendToAppWindows("on-download-progress", null);
+        this.downloadingGameId = null;
+        this.isPreparingDownload = false;
+      }
     } else if (downloadKey) {
       await TorrentService.call("action", {
         action: "cancel",
@@ -1428,6 +1473,7 @@ export class DownloadManager {
     this.usingJsDownloader = false;
     await this.jsDownloader?.cancelDownload();
     this.jsDownloader = null;
+    this.jsDownloaderDownloadId = null;
     this.allDebridBatch = null;
     this.downloadingGameId = null;
     this.isPreparingDownload = false;
@@ -1962,9 +2008,28 @@ export class DownloadManager {
   }
 
   private static buildPreflightHeaders(
+    url: string,
     base?: Record<string, string>
   ): Record<string, string> {
     const headers: Record<string, string> = { ...base };
+
+    try {
+      const hostname = new URL(url).hostname.toLowerCase();
+      const isMegaDBUrl =
+        hostname === "megadb.net" ||
+        hostname === "megadb.xyz" ||
+        hostname.endsWith(".megadb.net") ||
+        hostname.endsWith(".megadb.xyz");
+      const hasRefererHeader = Object.keys(headers).some(
+        (key) => key.toLowerCase() === "referer"
+      );
+
+      if (isMegaDBUrl && !hasRefererHeader) {
+        headers["Referer"] = "https://steamrip.com/";
+      }
+    } catch {
+      // Ignore malformed URLs; the direct fetch will fail naturally.
+    }
 
     const hasUserAgentHeader = Object.keys(headers).some(
       (key) => key.toLowerCase() === "user-agent"
@@ -2068,7 +2133,7 @@ export class DownloadManager {
     url: string;
     headers?: Record<string, string>;
   }) {
-    const headers = this.buildPreflightHeaders(options.headers);
+    const headers = this.buildPreflightHeaders(options.url, options.headers);
     const MAX_PREFLIGHT_ATTEMPTS = 3;
     const PREFLIGHT_RETRY_BASE_DELAY_MS = 1000;
 
@@ -2148,6 +2213,7 @@ export class DownloadManager {
           this.jsDownloader = new JsHttpDownloader(() =>
             this.publishJsDownloadProgress()
           );
+          this.jsDownloaderDownloadId = downloadId;
           this.jsDownloader.setMaxDownloadSpeedBytesPerSecond(
             this.maxDownloadSpeedBytesPerSecond
           );
@@ -2179,21 +2245,15 @@ export class DownloadManager {
           this.jsDownloader =
             pausedDownloader ??
             new JsHttpDownloader(() => this.publishJsDownloadProgress());
+          this.jsDownloaderDownloadId = downloadId;
           this.jsDownloader.setMaxDownloadSpeedBytesPerSecond(
             this.maxDownloadSpeedBytesPerSecond
           );
           this.isPreparingDownload = false;
 
           this.logResolvedUrl(options.url);
-          const maxConnections =
-            download.downloader === Downloader.Gofile
-              ? 4
-              : download.downloader === Downloader.Buzzheavier ||
-                  download.downloader === Downloader.PixelDrain
-                ? 12
-                : undefined;
           this.jsDownloader
-            .startDownload({ ...options, maxConnections })
+            .startDownload(options)
             .then(async () => {
               if (
                 this.downloadingGameId === downloadId &&

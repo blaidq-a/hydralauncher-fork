@@ -4,10 +4,22 @@ import { getHosterDownloader } from "./hoster-routing.js";
 import { Downloader } from "./constants.js";
 
 describe("getDownloadersForUri hoster routing", () => {
-  it("routes MegaDB links to MegaDB", () => {
+  it("routes MegaDB and Qiwi links through the supported filters", () => {
     assert.deepEqual(
       getHosterDownloader("https://www.megadb.net/file/abc"),
       Downloader.MegaDB
+    );
+    assert.deepEqual(
+      getHosterDownloader("https://megadb.xyz/file/abc"),
+      Downloader.MegaDB
+    );
+    assert.deepEqual(
+      getHosterDownloader("https://cdn.megadb.net/files/game.zip?sig=1"),
+      Downloader.MegaDB
+    );
+    assert.deepEqual(
+      getHosterDownloader("https://qiwi.gg/abc"),
+      Downloader.Hydra
     );
   });
 
@@ -18,6 +30,18 @@ describe("getDownloadersForUri hoster routing", () => {
     );
     assert.deepEqual(
       getHosterDownloader("https://bzzhr.to/abc"),
+      Downloader.Buzzheavier
+    );
+    assert.equal(
+      getHosterDownloader("https://bzzhr.co/abc"),
+      Downloader.Buzzheavier
+    );
+    assert.equal(
+      getHosterDownloader("https://fuckingfast.net/abc"),
+      Downloader.Buzzheavier
+    );
+    assert.equal(
+      getHosterDownloader("https://flashbang.sh/downloads/signed-file"),
       Downloader.Buzzheavier
     );
   });

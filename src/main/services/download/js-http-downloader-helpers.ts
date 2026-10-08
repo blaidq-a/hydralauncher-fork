@@ -7,8 +7,8 @@ export const MAX_RESTARTS_FROM_ZERO = 3;
 export const MIN_SEGMENTED_DOWNLOAD_SIZE = 32 * 1024 * 1024;
 export const MAX_SEGMENT_RANGE_BYTES = 64 * 1024 * 1024;
 export const MIN_DYNAMIC_SPLIT_RANGE_BYTES = 8 * 1024 * 1024;
-export const SEGMENTED_DOWNLOAD_CONNECTIONS = 8;
-export const MAX_SEGMENTED_DOWNLOAD_CONNECTIONS = 12;
+export const SEGMENTED_DOWNLOAD_CONNECTIONS = 10;
+export const MAX_SEGMENTED_DOWNLOAD_CONNECTIONS = 20;
 
 export interface DownloadByteRange {
   start: number;
@@ -62,6 +62,25 @@ export function areDownloadByteRangesComplete(
   );
 }
 
+export function isDownloadCompleteOnDisk(
+  actualBytes: number,
+  expectedBytes: number | null
+): boolean {
+  if (!Number.isSafeInteger(actualBytes) || actualBytes < 0) {
+    return false;
+  }
+
+  if (expectedBytes === null) {
+    return actualBytes > 0;
+  }
+
+  if (!Number.isSafeInteger(expectedBytes) || expectedBytes <= 0) {
+    return actualBytes > 0;
+  }
+
+  return actualBytes >= expectedBytes;
+}
+
 export function splitDownloadByteRange(
   range: DownloadByteRange,
   completedBytes: number,
@@ -111,7 +130,7 @@ export function createPositionalWriteStream(
       void (async () => {
         let totalWritten = 0;
         let offset = 0;
-        
+
         while (offset < buffer.length) {
           if (signal.aborted) {
             throw new Error("Segmented file write was aborted.");
@@ -126,7 +145,7 @@ export function createPositionalWriteStream(
           if (result.bytesWritten <= 0) {
             throw new Error("The target file write made no progress.");
           }
-          
+
           totalWritten += result.bytesWritten;
           offset += result.bytesWritten;
         }

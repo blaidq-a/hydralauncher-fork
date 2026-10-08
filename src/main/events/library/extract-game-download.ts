@@ -41,7 +41,7 @@ const extractGameDownload = async (
     return false;
   }
 
-  const runExtraction = () => {
+  const runExtraction = async () => {
     if (
       FILE_EXTENSIONS_TO_EXTRACT.some((ext) =>
         targetFolderName.toLowerCase().endsWith(ext)
@@ -57,6 +57,17 @@ const extractGameDownload = async (
     const targetPath = path.join(download.downloadPath, targetFolderName);
 
     if (fs.existsSync(targetPath) && fs.statSync(targetPath).isFile()) {
+      const isArchive = await gameFilesManager.isArchiveFile(targetPath);
+
+      if (isArchive) {
+        return gameFilesManager.extractDownloadedFile().catch((error) => {
+          logger.error(
+            "[extractGameDownload] Failed to extract archive without a recognized extension",
+            error
+          );
+        });
+      }
+
       return gameFilesManager
         .handleUnsupportedExtraction(targetPath, { notify: true })
         .catch((error) => {

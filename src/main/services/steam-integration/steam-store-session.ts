@@ -143,6 +143,7 @@ export const openSteamOpenIdWindow = (
 
   const parent = parentWindow();
   const window = new BrowserWindow({
+    title: "Hydra",
     width: 600,
     height: 800,
     parent: parent ?? undefined,

@@ -12,11 +12,20 @@ export function getHosterDownloader(uri: string): Downloader | undefined {
     return undefined;
   }
 
-  if (hasHost(hostname, "megadb.net")) return Downloader.MegaDB;
-  if (hasHost(hostname, "buzzheavier.com") || hasHost(hostname, "bzzhr.to"))
+  if (hasHost(hostname, "megadb.net") || hasHost(hostname, "megadb.xyz"))
+    return Downloader.MegaDB;
+  if (
+    hasHost(hostname, "buzzheavier.com") ||
+    hasHost(hostname, "bzzhr.to") ||
+    hasHost(hostname, "bzzhr.co") ||
+    hasHost(hostname, "fuckingfast.net") ||
+    hasHost(hostname, "flashbang.sh")
+  ) {
     return Downloader.Buzzheavier;
+  }
   if (hasHost(hostname, "gofile.io")) return Downloader.Gofile;
   if (hasHost(hostname, "pixeldrain.com")) return Downloader.PixelDrain;
+  if (hasHost(hostname, "qiwi.gg")) return Downloader.Hydra;
   if (hasHost(hostname, "datanodes.to")) return Downloader.Datanodes;
   if (hostname === "www.mediafire.com") return Downloader.Mediafire;
   if (hasHost(hostname, "fuckingfast.co")) return Downloader.FuckingFast;

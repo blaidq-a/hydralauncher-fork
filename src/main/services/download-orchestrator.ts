@@ -475,7 +475,7 @@ export class DownloadOrchestrator {
     const downloadId = getDownloadId(download);
     const wasActive = isActiveLikeDownload(download);
 
-    await DownloadManager.cancelDownload(getGameKey(download));
+    await DownloadManager.cancelDownload(getGameKey(download), download);
     WindowManager.sendToAppWindows("on-download-progress", null);
 
     await downloadsSublevel.put(getGameKey(download), {

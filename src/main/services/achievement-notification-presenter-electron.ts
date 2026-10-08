@@ -82,6 +82,7 @@ export const achievementNotificationPresenter =
     async createHost(position) {
       const { x, y } = getNotificationWindowPosition(position);
       const notificationWindow = new BrowserWindow({
+        title: "Hydra",
         show: false,
         transparent: true,
         maximizable: false,
