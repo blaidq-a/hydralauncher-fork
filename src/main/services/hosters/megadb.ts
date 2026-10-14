@@ -1,6 +1,6 @@
 import axios, { type AxiosRequestConfig } from "axios";
 
-const ARCHIVE_EXTENSION = /\.(?:rar|zip|7z)(?:$|[?#])/i;
+const ARCHIVE_EXTENSION = /\.(?:rar|zip|7z)(?:\$|[?#])/i;
 const MEGADB_REFERER = "https://steamrip.com/";
 const MEGADB_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
@@ -40,7 +40,7 @@ function isMegaDBDownloadUrl(value: string): boolean {
     if (ARCHIVE_EXTENSION.test(url.pathname)) return true;
 
     return (
-      /^\/download(?:\/|$)/i.test(url.pathname) &&
+      /^\/download(?:\/|\$)/i.test(url.pathname) &&
       ["download_token", "token", "file_id", "fileId", "file", "id"].some(
         (parameter) => url.searchParams.has(parameter)
       )
@@ -100,7 +100,7 @@ function extractMegaDBFormSubmission(
       "get"
     ).toLowerCase();
 
-    if (!/^(get|post)$/i.test(method)) continue;
+    if (!/^(get|post)\$/i.test(method)) continue;
 
     const fields: Record<string, string> = {};
     for (const inputMatch of formHtml.matchAll(
@@ -197,30 +197,7 @@ export function getMegaDBPageUrl(uri: string): string {
     throw new Error(`Unsupported MegaDB URL: ${uri}`);
   }
 
-  const segments = pageUrl.pathname.split("/").filter(Boolean);
-  const route = segments[0]?.toLowerCase();
-  if (route === "download") {
-    const fileId =
-      segments[1] ||
-      pageUrl.searchParams.get("file_id") ||
-      pageUrl.searchParams.get("fileId") ||
-      pageUrl.searchParams.get("file") ||
-      pageUrl.searchParams.get("id") ||
-      pageUrl.searchParams.get("slug");
-
-    if (!fileId) {
-      throw new Error(
-        "MegaDB download URL does not identify its file page. Open the original /file/<id> link."
-      );
-    }
-
-    pageUrl.pathname = `/file/${encodeURIComponent(fileId)}`;
-  } else if (route !== "file" || segments.length < 2) {
-    throw new Error(
-      "MegaDB URL is not a file page. Expected a URL in the form https://megadb.net/file/<id>."
-    );
-  }
-
+  // Zorunlu /file/ veya /download/ filtresi kaldırıldı; gelen URI doğrudan kabul edilir.
   pageUrl.protocol = "https:";
   pageUrl.hostname = "megadb.net";
   pageUrl.port = "";
