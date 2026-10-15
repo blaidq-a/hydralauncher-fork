@@ -1,362 +1,371 @@
-import axios, { type AxiosRequestConfig } from "axios";
+import { BrowserWindow } from "electron";
 
-const ARCHIVE_EXTENSION = /\.(?:rar|zip|7z)(?:\$|[?#])/i;
 const MEGADB_REFERER = "https://steamrip.com/";
 const MEGADB_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
-const MEGADB_HOSTS = ["megadb.net", "megadb.xyz"];
+const MEGADB_HOSTS = ["megadb.net", "megadb.xyz", "steamrip.com"];
 
-function decodeHtml(value: string): string {
-  return value
-    .replace(/\\\//g, "/")
-    .replace(/&amp;/gi, "&")
-    .replace(/&#0*38;/gi, "&")
-    .replace(/&quot;/gi, '"')
-    .replace(/&#0*39;|&apos;/gi, "'");
-}
+const TIMEOUT_MS = 60000; // toplam bekleme süresi
+const TICK_MS = 700; // sayfa kaç ms'de bir taranır
+const CLICK_GAP_MS = 1500; // aynı butona tekrar basmadan önceki bekleme
+const FREE_CLICK_GAP_MS = 4000; // "Free Download" sonrası sayfa geçişi beklemesi
+const DIAG_AFTER_MS = 10000; // tıklanacak buton bulunamazsa loglama süresi
 
 function isMegaDBHost(hostname: string): boolean {
-  const normalized = hostname.toLowerCase();
   return MEGADB_HOSTS.some(
-    (host) => normalized === host || normalized.endsWith(`.${host}`)
+    (host) => hostname.toLowerCase() === host || hostname.toLowerCase().endsWith(`.${host}`)
   );
 }
 
-function isHttpUrl(value: string, baseUrl: string): string | undefined {
-  try {
-    const url = new URL(decodeHtml(value), baseUrl);
-    return url.protocol === "http:" || url.protocol === "https:"
-      ? url.href
-      : undefined;
-  } catch {
-    return undefined;
-  }
+function isTorrentLink(url?: string): boolean {
+  if (!url) return false;
+  const l = url.toLowerCase();
+  if (l.includes(".css") || l.includes(".js") || l.includes(".png") || l.includes(".jpg") || l.includes(".woff")) return false;
+  return /\.torrent(?:[?#]|\$)/i.test(l) || l.includes(".torrent");
 }
 
-function isMegaDBDownloadUrl(value: string): boolean {
-  try {
-    const url = new URL(value);
-    if (!isMegaDBHost(url.hostname)) return true;
-    if (ARCHIVE_EXTENSION.test(url.pathname)) return true;
+function isDirectDownloadLink(url?: string): boolean {
+  if (!url) return false;
+  if (isTorrentLink(url)) return false; // Torrent linkleri doğrudan indirme sayılmasın
 
-    return (
-      /^\/download(?:\/|\$)/i.test(url.pathname) &&
-      ["download_token", "token", "file_id", "fileId", "file", "id"].some(
-        (parameter) => url.searchParams.has(parameter)
-      )
-    );
-  } catch {
-    return false;
-  }
-}
+  const l = url.toLowerCase();
 
-function getMegaDBDirectArchiveUrl(uri: string): string | null {
-  try {
-    const directUrl = new URL(uri.trim());
-    return isMegaDBHost(directUrl.hostname) &&
-      ARCHIVE_EXTENSION.test(directUrl.pathname)
-      ? directUrl.href
-      : null;
-  } catch {
-    return null;
-  }
-}
+  if (l.includes(".css") || l.includes(".js") || l.includes(".png") || l.includes(".jpg") || l.includes(".woff")) return false;
+  if (l.includes("steamrip.com") && !l.includes("download_token")) return false;
 
-function getMegaDBRequestHeaders(
-  referer: string,
-  accept = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-): Record<string, string> {
-  return {
-    Accept: accept,
-    "Accept-Language": "en-US,en;q=0.9",
-    Referer: referer,
-    "User-Agent": MEGADB_USER_AGENT,
-  };
-}
+  if (l.includes("download_token=")) return true;
+  if (/\.(rar|zip|7z|bin|iso|exe|tar|gz)(?:[?#]|\$)/i.test(l)) return true;
+  if (/https?:\/\/(?:fs|cdn)\d*\.megadb\.(?:xyz|net)/i.test(l)) return true;
 
-function extractMegaDBFormSubmission(
-  html: string,
-  baseUrl: string
-):
-  | { action: string; method: "get" | "post"; fields: Record<string, string> }
-  | undefined {
-  const formPattern = /<form\b[^>]*>([\s\S]*?)<\/form>/gi;
-
-  for (const match of html.matchAll(formPattern)) {
-    const formHtml = match[0];
-    const actionMatch = formHtml.match(
-      /\b(?:action|formaction)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i
-    );
-    if (!actionMatch) continue;
-
-    const actionValue = actionMatch[1] ?? actionMatch[2] ?? actionMatch[3];
-    const methodMatch = formHtml.match(
-      /\bmethod\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i
-    );
-    const method = (
-      methodMatch?.[1] ??
-      methodMatch?.[2] ??
-      methodMatch?.[3] ??
-      "get"
-    ).toLowerCase();
-
-    if (!/^(get|post)\$/i.test(method)) continue;
-
-    const fields: Record<string, string> = {};
-    for (const inputMatch of formHtml.matchAll(
-      /<input\b[^>]*name\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))[^>]*value\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))[^>]*>/gi
-    )) {
-      const name = inputMatch[1] ?? inputMatch[2] ?? inputMatch[3];
-      const value = inputMatch[4] ?? inputMatch[5] ?? inputMatch[6];
-      if (!name || !value) continue;
-      fields[name] = decodeHtml(value);
-    }
-
-    for (const inputMatch of formHtml.matchAll(
-      /<input\b[^>]*name\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))[^>]*>/gi
-    )) {
-      const name = inputMatch[1] ?? inputMatch[2] ?? inputMatch[3];
-      const valueMatch = inputMatch[0].match(
-        /\bvalue\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i
-      );
-      if (!name || valueMatch) continue;
-      const value = valueMatch?.[1] ?? valueMatch?.[2] ?? valueMatch?.[3] ?? "";
-      fields[name] = decodeHtml(value);
-    }
-
-    const action =
-      isHttpUrl(actionValue, baseUrl) ?? new URL(actionValue, baseUrl).href;
-    if (!action) continue;
-
-    return {
-      action,
-      method: method.toLowerCase() as "get" | "post",
-      fields,
-    };
-  }
-
-  return undefined;
-}
-
-export function extractMegaDBDownloadUrl(
-  html: string,
-  baseUrl: string
-): string {
-  const candidates: string[] = [];
-  const htmlWithDecodedSlashes = decodeHtml(html);
-  const hrefPattern =
-    /(?:href|data-url|data-download-url|action|formaction)\s*=\s*(["'])(.*?)\1/gi;
-
-  for (const match of htmlWithDecodedSlashes.matchAll(hrefPattern)) {
-    candidates.push(match[2]);
-  }
-
-  const absoluteUrlPattern = /https?:\/\/[^\s"'<>\\]+/gi;
-  for (const match of htmlWithDecodedSlashes.matchAll(absoluteUrlPattern)) {
-    candidates.push(match[0]);
-  }
-
-  const jsRedirectPattern =
-    /(?:window\s*\.location|location\s*\.)\s*(?:href|assign|replace)\s*[:=]\s*(?:"([^"]*)"|'([^']*)'|([^\s;]+))/gi;
-  for (const match of htmlWithDecodedSlashes.matchAll(jsRedirectPattern)) {
-    candidates.push(match[1] ?? match[2] ?? match[3] ?? "");
-  }
-
-  const urls = candidates
-    .map((candidate) => isHttpUrl(candidate, baseUrl))
-    .filter((candidate): candidate is string => candidate !== undefined);
-
-  const tokenUrl = urls.find((candidate) =>
-    /[?&](?:download_token|token|file_id|id)=/i.test(candidate)
-  );
-  if (tokenUrl) return tokenUrl;
-
-  const archiveUrl = urls.find((candidate) =>
-    ARCHIVE_EXTENSION.test(candidate)
-  );
-  if (archiveUrl) return archiveUrl;
-
-  const form = extractMegaDBFormSubmission(htmlWithDecodedSlashes, baseUrl);
-  if (form) {
-    return form.action;
-  }
-
-  throw new Error("MegaDB download link was not found on the page");
+  return false;
 }
 
 export function getMegaDBPageUrl(uri: string): string {
-  let pageUrl: URL;
+  let cleanUri = (uri || "").trim();
+  if (cleanUri.includes("steamrip.com/http")) cleanUri = cleanUri.split("steamrip.com/").pop() || cleanUri;
+
   try {
-    pageUrl = new URL(uri.trim());
+    const pageUrl = new URL(cleanUri);
+    if (pageUrl.hostname.includes("steamrip.com")) return pageUrl.href;
+    pageUrl.protocol = "https:";
+    pageUrl.hostname = "megadb.net";
+    return pageUrl.href;
   } catch {
-    throw new Error("Invalid MegaDB URL; expected a MegaDB file page URL.");
+    throw new Error("Invalid MegaDB URL.");
   }
+}
 
-  const hostname = pageUrl.hostname.toLowerCase();
-  if (!isMegaDBHost(hostname)) {
-    throw new Error(`Unsupported MegaDB URL: ${uri}`);
+type ProbeTarget = {
+  kind: "download" | "free";
+  x: number;
+  y: number;
+  text: string;
+  covered: boolean;
+};
+type ProbeResult = { links: string[]; target: ProbeTarget | null };
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+const stripHash = (u: string) => u.split("#")[0];
+
+const PROBE_SCRIPT = String.raw`(() => {
+  try {
+    if (!document.body || document.readyState === "loading") return null;
+
+    const norm = (s) => String(s || "").replace(/\s+/g, " ").trim().toLowerCase();
+    const textOf = (el) => norm(el.innerText || el.value || el.textContent);
+    const area = (el) => { const r = el.getBoundingClientRect(); return r.width * r.height; };
+    const short = (el, max) => { const t = textOf(el); return t.length > 0 && t.length <= max; };
+
+    const shown = (el) => {
+      if (!el || !el.isConnected) return false;
+      const r = el.getBoundingClientRect();
+      if (r.width < 4 || r.height < 4) return false;
+      if (typeof el.checkVisibility === "function") {
+        if (!el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) return false;
+      } else {
+        const cs = getComputedStyle(el);
+        if (cs.display === "none" || cs.visibility === "hidden" || cs.opacity === "0") return false;
+      }
+      return getComputedStyle(el).pointerEvents !== "none";
+    };
+
+    const enabled = (el) =>
+      !el.disabled && el.getAttribute("aria-disabled") !== "true" && !el.classList.contains("disabled");
+
+    const pick = (list) => {
+      const all = Array.from(new Set(list));
+      const leaf = all.filter((el) => !all.some((o) => o !== el && el.contains(o)));
+      const ok = leaf.filter((el) => shown(el) && enabled(el)).sort((a, b) => area(b) - area(a));
+      return ok[0] || null;
+    };
+
+    const describe = (kind, el) => {
+      let r = el.getBoundingClientRect();
+      if (r.top < 0 || r.left < 0 || r.bottom > innerHeight || r.right > innerWidth) {
+        el.scrollIntoView({ block: "center", inline: "center" });
+        r = el.getBoundingClientRect();
+      }
+      const x = Math.min(Math.max(r.left + r.width / 2, 1), innerWidth - 1);
+      const y = Math.min(Math.max(r.top + r.height / 2, 1), innerHeight - 1);
+      const top = document.elementFromPoint(x, y);
+      return { kind: kind, x: x, y: y, text: textOf(el).slice(0, 40), covered: !!top && !el.contains(top) };
+    };
+
+    const links = [];
+    const exts = [".rar", ".zip", ".7z", ".torrent"];
+    const here = location.href.split("#")[0];
+    for (const a of document.querySelectorAll("a[href]")) {
+      const href = (a.href || "").split("#")[0];
+      if (!href || href === here || href.startsWith("javascript:")) continue;
+      const path = href.split("?")[0].toLowerCase();
+      if (href.includes("download_token=") || exts.some((e) => path.endsWith(e))) {
+        links.push(href);
+        if (links.length >= 10) break;
+      }
+    }
+
+    const all = Array.from(document.querySelectorAll(
+      'a, button, input[type="submit"], input[type="button"], [role="button"], .btn, div[id*="download"]'
+    ));
+    const exact = ["download", "download file", "download link", "click here to download", "start download", "direct download"];
+
+    const rules = [
+      ["download", () => all.filter((e) => short(e, 40) && textOf(e).includes("download now"))],
+      ["free", () => [].concat(
+        Array.from(document.querySelectorAll('input[name="method_free"], button[name="method_free"], input[value*="Free"]')),
+        all.filter((e) => short(e, 40) && textOf(e).includes("free download"))
+      )],
+      ["download", () => all.filter((e) => exact.includes(textOf(e)) && !e.closest("nav, header, footer"))],
+      ["download", () => Array.from(document.querySelectorAll(
+        '#btn_download, #downloadbtn, .download-btn, form[name="F1"] button, form[name="F1"] input[type="submit"]'
+      )).filter((e) => !textOf(e).includes("premium"))],
+    ];
+
+    for (const rule of rules) {
+      const el = pick(rule[1]());
+      if (el) return { links: links, target: describe(rule[0], el) };
+    }
+    return { links: links, target: null };
+  } catch (e) {
+    return null;
   }
+})()`;
 
-  // Zorunlu /file/ veya /download/ filtresi kaldırıldı; gelen URI doğrudan kabul edilir.
-  pageUrl.protocol = "https:";
-  pageUrl.hostname = "megadb.net";
-  pageUrl.port = "";
-  pageUrl.search = "";
-  pageUrl.hash = "";
-  return pageUrl.href;
+const DIAG_SCRIPT = String.raw`(() => {
+  const out = [];
+  const sel = 'a, button, input[type="submit"], input[type="button"], [role="button"], .btn';
+  for (const el of document.querySelectorAll(sel)) {
+    const r = el.getBoundingClientRect();
+    if (r.width < 4 || r.height < 4) continue;
+    const t = String(el.innerText || el.value || el.textContent || "").replace(/\s+/g, " ").trim().slice(0, 40);
+    if (!t) continue;
+    const cs = getComputedStyle(el);
+    const flags =
+      (el.disabled || el.classList.contains("disabled") || el.getAttribute("aria-disabled") === "true" ? "[disabled]" : "") +
+      (cs.pointerEvents === "none" ? "[pointer-events:none]" : "") +
+      (cs.visibility === "hidden" || cs.opacity === "0" ? "[hidden]" : "");
+    out.push(el.tagName.toLowerCase() + (el.id ? "#" + el.id : "") + flags + ' "' + t + '"');
+    if (out.length >= 15) break;
+  }
+  return out;
+})()`;
+
+async function realClick(wc: Electron.WebContents, x: number, y: number): Promise<void> {
+  const z = wc.getZoomFactor();
+  const px = Math.round(x * z);
+  const py = Math.round(y * z);
+
+  wc.focus();
+  wc.sendInputEvent({ type: "mouseMove", x: px, y: py });
+  await sleep(60);
+  if (wc.isDestroyed()) return;
+  wc.sendInputEvent({ type: "mouseDown", x: px, y: py, button: "left", clickCount: 1 });
+  await sleep(70);
+  if (wc.isDestroyed()) return;
+  wc.sendInputEvent({ type: "mouseUp", x: px, y: py, button: "left", clickCount: 1 });
 }
 
 export class MegaDBApi {
   public static canHandle(uri: string): boolean {
     try {
-      const { hostname } = new URL(uri);
-      return isMegaDBHost(hostname);
+      return isMegaDBHost(new URL(uri).hostname);
     } catch {
       return false;
     }
   }
 
-  private static async requestPage(url: string): Promise<string> {
-    const response = await axios.get<string>(url, {
-      headers: getMegaDBRequestHeaders(MEGADB_REFERER),
-      timeout: 30000,
-      validateStatus: (status) => status >= 200 && status < 500,
-    });
+  public static async getDownloadUrl(uri: string): Promise<string> {
+    const rawUri = (uri || "").trim();
 
-    const body = response.data ?? "";
-    const lowerBody = body.toLowerCase();
-    if (
-      response.status === 403 ||
-      lowerBody.includes("referrer not allowed") ||
-      lowerBody.includes("the domain does not have approval")
-    ) {
-      throw new Error(
-        "MegaDB rejected the request because the required Referer header was missing or invalid. Use Referer: https://steamrip.com/."
-      );
+    if (isTorrentLink(rawUri)) {
+      throw new Error("Bu dosya torrent lütfen başka bi hoster deneyin");
     }
+    if (isDirectDownloadLink(rawUri)) return rawUri;
 
-    if (
-      response.status === 404 ||
-      lowerBody.includes("not found") ||
-      lowerBody.includes("file was deleted") ||
-      lowerBody.includes("invalid file") ||
-      lowerBody.includes("expired")
-    ) {
-      throw new Error(`MegaDB file page was not found or is invalid: ${url}`);
-    }
+    const pageUrl = getMegaDBPageUrl(rawUri);
 
-    return body;
-  }
-
-  private static async resolveFormAction(
-    html: string,
-    pageUrl: string
-  ): Promise<string | null> {
-    const submission = extractMegaDBFormSubmission(html, pageUrl);
-    if (!submission) return null;
-
-    try {
-      const formResponse = await axios.request<string>({
-        url: submission.action,
-        method: submission.method.toUpperCase() as AxiosRequestConfig["method"],
-        maxRedirects: 0,
-        validateStatus: (status) => status >= 200 && status < 500,
-        headers: {
-          ...getMegaDBRequestHeaders(pageUrl),
-          Accept:
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          Origin: "https://megadb.net",
-          "Content-Type": "application/x-www-form-urlencoded",
+    return new Promise<string>((resolve, reject) => {
+      const win = new BrowserWindow({
+        show: false,
+        width: 1024,
+        height: 768,
+        webPreferences: {
+          nodeIntegration: false,
+          contextIsolation: true,
+          webSecurity: false,
+          backgroundThrottling: false,
+          partition: "persist:megadb",
         },
-        data:
-          submission.method === "post"
-            ? new URLSearchParams(submission.fields).toString()
-            : undefined,
-        timeout: 30000,
+      });
+      const wc = win.webContents;
+      const ses = wc.session;
+
+      let finished = false;
+      let busy = false;
+      let clicks = 0;
+      let loads = 0;
+      let lastClickAt = 0;
+      let lastClickKind = "";
+      let lastSeenTargetAt = Date.now();
+      let lastDiagAt = 0;
+      let errorLogs = 0;
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
+      let tickId: ReturnType<typeof setInterval> | undefined;
+
+      const cleanup = () => {
+        if (timeoutId) clearTimeout(timeoutId);
+        if (tickId) clearInterval(tickId);
+        ses.removeAllListeners("will-download");
+        ses.webRequest.onBeforeRequest(null);
+        ses.webRequest.onBeforeRedirect(null);
+        if (!win.isDestroyed()) win.destroy();
+      };
+      const succeed = (url: string) => {
+        if (finished) return;
+        finished = true;
+        console.log("[MegaDB] Direkt indirme linki yakalandı.");
+        resolve(url);
+        setImmediate(cleanup);
+      };
+      const fail = (err: Error) => {
+        if (finished) return;
+        finished = true;
+        reject(err);
+        setImmediate(cleanup);
+      };
+
+      wc.setAudioMuted(true);
+      wc.setWindowOpenHandler(() => ({ action: "deny" }));
+      win.on("closed", () => fail(new Error("MegaDB penceresi kapatıldı.")));
+      wc.on("did-finish-load", () => {
+        loads++;
+        lastClickAt = 0;
+        console.log(`[MegaDB] Sayfa yüklendi (#${loads}): ${new URL(wc.getURL() || "about:blank").host}`);
       });
 
-      const location = formResponse.headers.location;
-      if (typeof location === "string") {
-        const redirectUrl = isHttpUrl(location, submission.action);
-        if (redirectUrl && isMegaDBDownloadUrl(redirectUrl)) {
-          return redirectUrl;
+      timeoutId = setTimeout(
+        () => fail(new Error(`MegaDB Reddedildi: ${TIMEOUT_MS / 1000} saniye içinde indirme bağlantısı alınamadı.`)),
+        TIMEOUT_MS
+      );
+
+      // 1. Ağ isteklerini yakala
+      ses.webRequest.onBeforeRequest((details, callback) => {
+        if (isTorrentLink(details.url)) {
+          callback({ cancel: true });
+          fail(new Error("Bu dosya torrent lütfen başka bi hoster deneyin"));
+          return;
         }
-      }
-
-      const directUrl = extractMegaDBDownloadUrl(
-        formResponse.data,
-        formResponse.request?.res?.responseUrl || submission.action
-      );
-      if (directUrl) return directUrl;
-    } catch (error) {
-      if (
-        axios.isAxiosError(error) &&
-        (error.response?.status === 404 || error.response?.status === 410)
-      ) {
-        throw new Error(
-          `MegaDB file was removed or is unavailable: ${pageUrl}`
-        );
-      }
-      if (
-        error instanceof Error &&
-        error.message.includes("Referrer not allowed")
-      ) {
-        throw error;
-      }
-    }
-
-    return null;
-  }
-
-  public static async getDownloadUrl(uri: string): Promise<string> {
-    const directArchiveUrl = getMegaDBDirectArchiveUrl(uri);
-    if (directArchiveUrl) return directArchiveUrl;
-
-    let pageUrl: string;
-    try {
-      pageUrl = getMegaDBPageUrl(uri);
-    } catch (error) {
-      throw new Error(
-        `Failed to resolve MegaDB download page: ${error instanceof Error ? error.message : String(error)}`,
-        { cause: error }
-      );
-    }
-
-    try {
-      const pageHtml = await this.requestPage(pageUrl);
-      const directUrl = extractMegaDBDownloadUrl(pageHtml, pageUrl);
-
-      if (isMegaDBDownloadUrl(directUrl)) {
-        return directUrl;
-      }
-
-      const formResult = await this.resolveFormAction(pageHtml, pageUrl);
-      if (formResult) return formResult;
-
-      throw new Error(
-        `MegaDB file page did not contain a fresh download token or direct archive link: ${pageUrl}`
-      );
-    } catch (error) {
-      if (error instanceof Error) {
-        const message = error.message;
-        if (
-          message.includes("Referrer not allowed") ||
-          message.includes("required Referer")
-        ) {
-          throw error;
+        if (isDirectDownloadLink(details.url)) {
+          callback({ cancel: true });
+          succeed(details.url);
+          return;
         }
-        if (
-          message.includes("was not found") ||
-          message.includes("removed or is unavailable")
-        ) {
-          throw error;
-        }
-      }
+        callback({});
+      });
 
-      throw new Error(
-        `Failed to fetch or resolve the MegaDB file page ${pageUrl}: ${error instanceof Error ? error.message : String(error)}`,
-        { cause: error }
-      );
-    }
+      // 2. Yönlendirmeleri yakala
+      ses.webRequest.onBeforeRedirect((details) => {
+        if (isTorrentLink(details.redirectURL)) {
+          fail(new Error("Bu dosya torrent lütfen başka bi hoster deneyin"));
+          return;
+        }
+        if (isDirectDownloadLink(details.redirectURL)) succeed(details.redirectURL);
+      });
+
+      // 3. Tarayıcı indirmesini yakala
+      ses.on("will-download", (event, item) => {
+        event.preventDefault();
+        const url = item.getURL();
+        if (isTorrentLink(url)) {
+          fail(new Error("Bu dosya torrent lütfen başka bi hoster deneyin"));
+          return;
+        }
+        if (isDirectDownloadLink(url)) succeed(url);
+      });
+
+      // 4. Bot tık döngüsü
+      const tick = async () => {
+        if (finished || busy || wc.isDestroyed()) return;
+        busy = true;
+        try {
+          const probe = (await wc.executeJavaScript(PROBE_SCRIPT)) as ProbeResult | null;
+          if (finished || !probe) return;
+
+          const here = stripHash(wc.getURL());
+
+          // Torrent linki tespit edilirse direkt torrent uyarısı ver
+          const torrentDirect = probe.links.find(
+            (l) => stripHash(l) !== here && stripHash(l) !== stripHash(pageUrl) && isTorrentLink(l)
+          );
+          if (torrentDirect) {
+            fail(new Error("Bu dosya torrent lütfen başka bi hoster deneyin"));
+            return;
+          }
+
+          const direct = probe.links.find(
+            (l) => stripHash(l) !== here && stripHash(l) !== stripHash(pageUrl) && isDirectDownloadLink(l)
+          );
+          if (direct) {
+            succeed(direct);
+            return;
+          }
+
+          const t = probe.target;
+          if (!t) {
+            const now = Date.now();
+            if (now - lastSeenTargetAt > DIAG_AFTER_MS && now - lastDiagAt > DIAG_AFTER_MS) {
+              lastDiagAt = now;
+              const seen = (await wc.executeJavaScript(DIAG_SCRIPT)) as string[];
+              console.log("[MegaDB] Basılacak buton bulunamadı. Sayfadaki butonlar:", seen);
+            }
+            return;
+          }
+          lastSeenTargetAt = Date.now();
+
+          const gap = t.kind === "free" ? FREE_CLICK_GAP_MS : CLICK_GAP_MS;
+          if (t.kind === lastClickKind && Date.now() - lastClickAt < gap) return;
+
+          lastClickAt = Date.now();
+          lastClickKind = t.kind;
+          clicks++;
+          console.log(
+            `[MegaDB] Tık #${clicks} -> ${t.kind} "${t.text}"` + (t.covered ? " (üstü kapalı, reklam katmanı olabilir)" : "")
+          );
+          await realClick(wc, t.x, t.y);
+        } catch (err) {
+          if (errorLogs++ < 3) console.warn("[MegaDB] tick hatası:", (err as Error)?.message ?? err);
+        } finally {
+          busy = false;
+        }
+      };
+      tickId = setInterval(tick, TICK_MS);
+
+      win
+        .loadURL(pageUrl, { userAgent: MEGADB_USER_AGENT, httpReferrer: MEGADB_REFERER })
+        .catch((err: { code?: string; errno?: number; message?: string }) => {
+          if (err?.code === "ERR_ABORTED" || err?.errno === -3) return;
+          fail(new Error(`MegaDB sayfası açılamadı: ${err?.message ?? err}`));
+        });
+    });
   }
 }
