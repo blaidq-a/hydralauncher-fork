@@ -81,6 +81,46 @@ export function isDownloadCompleteOnDisk(
   return actualBytes >= expectedBytes;
 }
 
+export interface SegmentSplitState {
+  ranges: DownloadByteRange[];
+  checkpointRanges: DownloadByteRange[];
+  offsets: number[];
+  retryCounts: number[];
+}
+
+/**
+ * Applies a dynamic split of `segmentIndex` into `leftRange` + `rightRange`.
+ *
+ * The left part replaces the segment in place and the right part is appended
+ * at the end, so the index of every other (possibly still running or queued)
+ * segment stays valid. Inserting in the middle shifted those indices and made
+ * running segments credit their bytes to the wrong range, which left holes in
+ * the downloaded file. Returns the index of the new right segment.
+ */
+export function applySegmentSplit(
+  state: SegmentSplitState,
+  segmentIndex: number,
+  leftRange: DownloadByteRange,
+  rightRange: DownloadByteRange
+): number {
+  const rightIndex = state.ranges.length;
+
+  state.ranges[segmentIndex] = leftRange;
+  state.ranges.push(rightRange);
+
+  // `ranges` and the checkpoint's ranges are usually the same array; only
+  // update the checkpoint separately when it is a distinct copy.
+  if (state.checkpointRanges !== state.ranges) {
+    state.checkpointRanges[segmentIndex] = leftRange;
+    state.checkpointRanges.push(rightRange);
+  }
+
+  state.offsets.push(0);
+  state.retryCounts.push(0);
+
+  return rightIndex;
+}
+
 export function splitDownloadByteRange(
   range: DownloadByteRange,
   completedBytes: number,
@@ -114,14 +154,27 @@ export function splitDownloadByteRange(
   ];
 }
 
+export type PositionalWriteStream = Writable & {
+  /**
+   * Resolves once every write handed to the file has finished and been
+   * reported through `onWritten`, even after the stream was destroyed.
+   */
+  whenIdle: () => Promise<void>;
+};
+
 export function createPositionalWriteStream(
   fileHandle: FileHandle,
   startPosition: number,
   highWaterMark: number,
   onWritten: (byteLength: number) => Promise<void>,
   signal: AbortSignal
-): Writable {
+): PositionalWriteStream {
   let position = startPosition;
+  let inFlight: Promise<void> = Promise.resolve();
+  const track = (write: Promise<void>) => {
+    inFlight = write.catch(() => undefined);
+    return write;
+  };
 
   const writeBuffer = async (buffer: Buffer) => {
     let totalWritten = 0;
@@ -163,10 +216,13 @@ export function createPositionalWriteStream(
             : new Error(String(error))
       );
 
-  return new Writable({
+  const stream = new Writable({
     highWaterMark,
     write: (chunk: Buffer | string, _encoding, callback) => {
-      writeBuffer(toBuffer(chunk)).then(() => callback(), finish(callback));
+      track(writeBuffer(toBuffer(chunk))).then(
+        () => callback(),
+        finish(callback)
+      );
     },
     // Network chunks are small (16-64 KiB). While a write is in flight, Node
     // buffers the following chunks and hands them over here, so they are
@@ -178,9 +234,11 @@ export function createPositionalWriteStream(
         chunks.length === 1
           ? toBuffer(chunks[0].chunk)
           : Buffer.concat(chunks.map(({ chunk }) => toBuffer(chunk)));
-      writeBuffer(buffer).then(() => callback(), finish(callback));
+      track(writeBuffer(buffer)).then(() => callback(), finish(callback));
     },
   });
+
+  return Object.assign(stream, { whenIdle: () => inFlight });
 }
 
 export function createDownloadByteRanges(

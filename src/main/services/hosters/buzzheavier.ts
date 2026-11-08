@@ -2,6 +2,9 @@ import axios from "axios";
 import { HOSTER_USER_AGENT } from "./hoster-user-agent.js";
 
 const HOSTS = ["buzzheavier.com", "bzzhr.to", "bzzhr.co", "fuckingfast.net"];
+// Permanent page links that only resolve when opened from SteamRIP (the
+// server checks the Referer), so they need the SteamRIP game page as Referer.
+const REFERER_GATED_HOSTS = ["buzzheavier.com", "bzzhr.to", "bzzhr.co"];
 const DIRECT_DOWNLOAD_HOSTS = ["ts.bzzhr.to", "flashbang.sh"];
 const DOWNLOAD_ACTION_PATTERN =
   /hx-(get|post)\s*=\s*(["'])([^"']*\/download(?:[/?#][^"']*)?)\2/i;
@@ -55,6 +58,41 @@ export function extractBuzzheavierRedirect(
   return undefined;
 }
 
+const matchesHost = (hostname: string, hosts: string[]) =>
+  hosts.some((host) => hostname === host || hostname.endsWith(`.${host}`));
+
+/** True for permanent `bzzhr.to/<id>` / `buzzheavier.com/<id>` page links. */
+export function isBuzzheavierPageLink(uri: string): boolean {
+  try {
+    const hostname = new URL(uri).hostname.toLowerCase();
+    return (
+      matchesHost(hostname, REFERER_GATED_HOSTS) &&
+      !matchesHost(hostname, DIRECT_DOWNLOAD_HOSTS)
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Turns `Set-Cookie` headers into a `Cookie` request header value. */
+export function toCookieHeader(setCookie: unknown): string | undefined {
+  const values = Array.isArray(setCookie)
+    ? setCookie
+    : typeof setCookie === "string"
+      ? [setCookie]
+      : [];
+  const pairs = values
+    .map((value) => String(value).split(";")[0]?.trim())
+    .filter((pair): pair is string => !!pair && pair.includes("="));
+
+  return pairs.length > 0 ? pairs.join("; ") : undefined;
+}
+
+export interface BuzzheavierResolveOptions {
+  /** Page that linked to the file (the SteamRIP game page). */
+  referer?: string;
+}
+
 export function extractBuzzheavierDownloadToken(
   html: string
 ): string | undefined {
@@ -74,7 +112,10 @@ export class BuzzheavierApi {
     }
   }
 
-  public static async getDownloadUrl(uri: string): Promise<string> {
+  public static async getDownloadUrl(
+    uri: string,
+    options: BuzzheavierResolveOptions = {}
+  ): Promise<string> {
     if (!this.canHandle(uri)) {
       throw new Error(`Unsupported Buzzheavier URL: ${uri}`);
     }
@@ -92,9 +133,14 @@ export class BuzzheavierApi {
       headers: {
         "User-Agent": HOSTER_USER_AGENT,
         Accept: "text/html,application/xhtml+xml",
+        ...(options.referer ? { Referer: options.referer } : {}),
       },
       timeout: 30000,
     });
+
+    // Carry the page's session cookies into the download request, like a
+    // browser would after opening the page from SteamRIP.
+    const cookieHeader = toCookieHeader(pageResponse.headers?.["set-cookie"]);
 
     const pageUrl = pageResponse.request?.res?.responseUrl || uri;
     const action = extractBuzzheavierDownloadAction(pageResponse.data, pageUrl);
@@ -119,6 +165,7 @@ export class BuzzheavierApi {
         "HX-Request": "true",
         "HX-Current-URL": pageUrl,
         Referer: pageUrl,
+        ...(cookieHeader ? { Cookie: cookieHeader } : {}),
       },
       timeout: 30000,
     });

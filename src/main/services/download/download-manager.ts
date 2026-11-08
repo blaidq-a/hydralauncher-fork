@@ -21,6 +21,8 @@ import {
   MegaDBApi,
   BuzzheavierApi,
 } from "../hosters";
+import { isBuzzheavierPageLink } from "../hosters/buzzheavier";
+import { findSteamRipRefererForUri } from "../hosters/steamrip-referer";
 import { TorrentService } from "../torrent-service";
 import {
   LibtorrentPayload,
@@ -96,6 +98,7 @@ interface AllDebridBatchState {
 }
 
 const JS_PROGRESS_WATCHER_SKIP_MS = 1500;
+const BUZZHEAVIER_RESOLVE_RETRY_DELAYS_MS = [1500, 3000];
 
 // Keep segmented download checkpoints in app data instead of next to games.
 // Resolved lazily so a customised userData path is honoured.
@@ -251,7 +254,10 @@ export class DownloadManager {
 
     try {
       const parsedUrl = new URL(url);
-      sanitizedUrl = `${parsedUrl.origin}${parsedUrl.pathname}`;
+      // Buzzheavier CDN paths carry the download token; log the host only.
+      sanitizedUrl = BuzzheavierApi.canHandle(url)
+        ? parsedUrl.origin
+        : `${parsedUrl.origin}${parsedUrl.pathname}`;
     } catch {
       sanitizedUrl = url.replace(/[?#].*$/, "");
     }
@@ -1772,11 +1778,63 @@ export class DownloadManager {
     );
   }
 
+  /**
+   * Resolves a Buzzheavier link to its short-lived CDN URL. Called on every
+   * start and resume (tokens expire), never cached or persisted. Permanent
+   * `bzzhr.to` / `buzzheavier.com` page links only resolve when opened from
+   * SteamRIP, so the matching SteamRIP game page is sent as Referer.
+   */
+  private static async resolveBuzzheavierUrl(uri: string): Promise<{
+    url: string;
+    headers?: Record<string, string>;
+  }> {
+    if (!isBuzzheavierPageLink(uri)) {
+      return { url: await BuzzheavierApi.getDownloadUrl(uri) };
+    }
+
+    const referer = await findSteamRipRefererForUri(uri);
+    let lastError: unknown;
+
+    for (
+      let attempt = 0;
+      attempt <= BUZZHEAVIER_RESOLVE_RETRY_DELAYS_MS.length;
+      attempt++
+    ) {
+      if (attempt > 0) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, BUZZHEAVIER_RESOLVE_RETRY_DELAYS_MS[attempt - 1])
+        );
+      }
+
+      try {
+        const url = await BuzzheavierApi.getDownloadUrl(uri, { referer });
+        // The browser follows hx-redirect from the Buzzheavier page, so the
+        // CDN request carries that page as Referer.
+        return { url, headers: { Referer: uri } };
+      } catch (error) {
+        lastError = error;
+        logger.warn(
+          `[DownloadManager] Buzzheavier resolve attempt ${attempt + 1} failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
+    }
+
+    logger.error(
+      "[DownloadManager] Could not resolve Buzzheavier link",
+      lastError instanceof Error ? lastError.message : lastError
+    );
+    throw new Error(DownloadError.BuzzheavierResolveFailed);
+  }
+
   private static async getBuzzheavierDownloadOptions(
     download: Download,
     resumingFilename?: string
   ) {
-    const downloadUrl = await BuzzheavierApi.getDownloadUrl(download.uri);
+    const { url: downloadUrl, headers } = await this.resolveBuzzheavierUrl(
+      download.uri
+    );
     const filename = this.resolveFilename(
       resumingFilename,
       download.uri,
@@ -1785,7 +1843,8 @@ export class DownloadManager {
     return this.buildDownloadOptions(
       downloadUrl,
       download.downloadPath,
-      filename
+      filename,
+      headers
     );
   }
 
@@ -1973,7 +2032,9 @@ export class DownloadManager {
         };
       }
       case Downloader.Buzzheavier: {
-        const downloadUrl = await BuzzheavierApi.getDownloadUrl(download.uri);
+        const { url: downloadUrl } = await this.resolveBuzzheavierUrl(
+          download.uri
+        );
         return {
           action: "start",
           game_id: downloadId,

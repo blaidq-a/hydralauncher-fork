@@ -21,7 +21,12 @@ import {
 } from "@renderer/context";
 import { useDownload } from "@renderer/hooks";
 import { GameOptionsModal, RepacksModal } from "./modals";
-import { Downloader, getDownloadersForUri } from "@shared";
+import {
+  DownloadError,
+  Downloader,
+  getDownloadersForUri,
+  getHosterDownloader,
+} from "@shared";
 import { CloudSyncFilesModal } from "./cloud-sync-files-modal/cloud-sync-files-modal";
 import { CloudSaveV2Provider } from "./cloud-save-v2";
 import "./game-details.scss";
@@ -115,23 +120,54 @@ export default function GameDetails() {
             automaticallyDeleteArchiveFiles = false,
             signal?: AbortSignal
           ) => {
-            const payload = {
+            const selectedUri = selectRepackUri(repack, downloader);
+            const buildPayload = (uri: string, uriDownloader: Downloader) => ({
               objectId: objectId!,
               title: gameTitle,
-              downloader,
+              downloader: uriDownloader,
               shop,
               downloadPath,
-              uri: selectRepackUri(repack, downloader),
+              uri,
               automaticallyExtract,
               automaticallyDeleteArchiveFiles,
               fileSize: repack.fileSize,
               fileIndices,
               selectedFilesSize,
+            });
+            const submit = (uri: string, uriDownloader: Downloader) => {
+              const payload = buildPayload(uri, uriDownloader);
+              return addToQueueOnly
+                ? addGameToQueue(payload, signal)
+                : startDownload(payload, signal);
             };
 
-            const response = addToQueueOnly
-              ? await addGameToQueue(payload, signal)
-              : await startDownload(payload, signal);
+            let response = await submit(selectedUri, downloader);
+
+            // If a Buzzheavier link cannot be resolved, fall back to the
+            // repack's other hosters in order before reporting the error.
+            if (
+              !response.ok &&
+              response.error === DownloadError.BuzzheavierResolveFailed &&
+              !signal?.aborted
+            ) {
+              for (const uri of repack.uris) {
+                const uriDownloader = getHosterDownloader(uri);
+                if (
+                  uri === selectedUri ||
+                  uriDownloader === undefined ||
+                  uriDownloader === Downloader.Buzzheavier
+                ) {
+                  continue;
+                }
+
+                const fallbackResponse = await submit(uri, uriDownloader);
+                if (fallbackResponse.ok) {
+                  response = fallbackResponse;
+                  break;
+                }
+                if (signal?.aborted) break;
+              }
+            }
 
             if (response.ok) {
               await updateGame();

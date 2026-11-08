@@ -25,6 +25,7 @@ import { format } from "date-fns";
 import { AchievementNotificationInfo, GameRepack } from "@types";
 
 export * from "./archive-org";
+export { getHosterDownloader } from "./hoster-routing";
 export * from "./constants";
 export {
   shouldAutoStartSteamSync,

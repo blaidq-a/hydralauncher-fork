@@ -30,6 +30,7 @@ import {
   SEGMENTED_DOWNLOAD_CONNECTIONS,
   shouldResetRetryBudget,
   splitDownloadByteRange,
+  applySegmentSplit,
   stallDetected,
 } from "./js-http-downloader-helpers.js";
 
@@ -1573,21 +1574,18 @@ export class JsHttpDownloader {
                 );
                 if (splitRanges) {
                   const [leftRange, rightRange] = splitRanges;
-                  const rightIndex = segmentIndex + 1;
-                  ranges.splice(segmentIndex, 1, leftRange, rightRange);
-                  checkpoint.ranges.splice(
+                  const rightIndex = applySegmentSplit(
+                    {
+                      ranges,
+                      checkpointRanges: checkpoint.ranges,
+                      offsets: checkpoint.offsets,
+                      retryCounts,
+                    },
                     segmentIndex,
-                    1,
                     leftRange,
                     rightRange
                   );
-                  checkpoint.offsets.splice(
-                    segmentIndex,
-                    1,
-                    checkpoint.offsets[segmentIndex],
-                    0
-                  );
-                  retryCounts.splice(segmentIndex, 1, 0, 0);
+                  retryCounts[segmentIndex] = 0;
                   checkpoint.segmentCount = ranges.length;
                   pendingSegments.unshift(rightIndex);
                   logger.log(
@@ -1823,6 +1821,11 @@ export class JsHttpDownloader {
     } finally {
       cleanupAttempt();
       segmentResponse.data.destroy();
+      // A write may still be landing after an abort. Wait for it so the
+      // segment offset matches the bytes on disk before any retry or
+      // fallback reads it; otherwise a later attempt can start past the real
+      // data and leave a gap that corrupts the archive.
+      await writeStream.whenIdle();
       this.segmentedWriteStreams.delete(writeStream);
     }
   }

@@ -84,6 +84,7 @@ export enum DownloadError {
   HosterUnlockFileNotFound = "download_error_hoster_unlock_file_not_found",
   HosterUnlockUnavailable = "download_error_hoster_unlock_unavailable",
   DownloadLinkReturnedWebPage = "download_error_link_returned_web_page",
+  BuzzheavierResolveFailed = "download_error_buzzheavier_resolve_failed",
   InvalidMagnet = "download_error_invalid_magnet",
   TorrentMetadataTimeout = "download_error_torrent_metadata_timeout",
   TorrentMetadataIncomplete = "download_error_torrent_metadata_incomplete",

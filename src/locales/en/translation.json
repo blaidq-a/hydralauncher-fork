@@ -883,6 +883,7 @@
     "download_error_hoster_unlock_file_not_found": "This file is no longer available on the hoster.",
     "download_error_hoster_unlock_unavailable": "The hoster is unavailable right now. Please try again later.",
     "download_error_link_returned_web_page": "The download link returned a web page instead of a file. It may have expired or been removed.",
+    "download_error_buzzheavier_resolve_failed": "Could not get a download link from Buzzheavier. The link may have been removed or the site is not responding. Try another download option.",
     "download_error_invalid_magnet": "Invalid magnet link.",
     "download_error_torrent_metadata_timeout": "Timed out while fetching torrent metadata. Please try again.",
     "download_error_torrent_metadata_incomplete": "Torrent metadata is incomplete and cannot be processed right now.",

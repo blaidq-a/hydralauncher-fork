@@ -6,6 +6,8 @@ import {
   extractBuzzheavierDownloadAction,
   extractBuzzheavierDownloadToken,
   extractBuzzheavierRedirect,
+  isBuzzheavierPageLink,
+  toCookieHeader,
 } from "./buzzheavier.js";
 
 const originalAdapter = axios.defaults.adapter;
@@ -106,5 +108,63 @@ describe("BuzzheavierApi", () => {
       new URL(resolvedDownloadEndpoint).searchParams.get("t"),
       "short-lived-token"
     );
+  });
+  it("only treats permanent page links as Referer-gated", () => {
+    assert.equal(isBuzzheavierPageLink("https://bzzhr.to/t5w7osooelhn"), true);
+    assert.equal(isBuzzheavierPageLink("https://buzzheavier.com/abc"), true);
+    assert.equal(
+      isBuzzheavierPageLink("https://ts.bzzhr.to/d/abc/game.rar?v=1"),
+      false
+    );
+    assert.equal(isBuzzheavierPageLink("https://flashbang.sh/x"), false);
+    assert.equal(isBuzzheavierPageLink("https://gofile.io/d/abc"), false);
+  });
+
+  it("builds a Cookie header from Set-Cookie values", () => {
+    assert.equal(
+      toCookieHeader(["a=1; Path=/; HttpOnly", "b=2; Secure"]),
+      "a=1; b=2"
+    );
+    assert.equal(toCookieHeader(undefined), undefined);
+  });
+
+  it("sends the SteamRIP Referer and page cookies while resolving", async () => {
+    const seen: Record<string, Record<string, unknown>> = {};
+    axios.defaults.adapter = async (config) => {
+      const pathname = new URL(config.url ?? "").pathname;
+      seen[pathname] = { ...(config.headers as Record<string, unknown>) };
+
+      if (pathname === "/t5w7osooelhn") {
+        return {
+          data: '<button hx-get="/t5w7osooelhn/download?t=tok">Download</button>',
+          status: 200,
+          statusText: "OK",
+          headers: new AxiosHeaders({ "set-cookie": ["sid=abc; Path=/"] }),
+          config,
+        };
+      }
+
+      return {
+        data: "",
+        status: 204,
+        statusText: "No Content",
+        headers: new AxiosHeaders({
+          "hx-redirect": "https://ts.bzzhr.to/d/abc/game.rar?v=1",
+        }),
+        config,
+      };
+    };
+
+    assert.equal(
+      await BuzzheavierApi.getDownloadUrl("https://bzzhr.to/t5w7osooelhn", {
+        referer: "https://steamrip.com/god-of-war-free-download/",
+      }),
+      "https://ts.bzzhr.to/d/abc/game.rar?v=1"
+    );
+    assert.equal(
+      seen["/t5w7osooelhn"].Referer,
+      "https://steamrip.com/god-of-war-free-download/"
+    );
+    assert.equal(seen["/t5w7osooelhn/download"].Cookie, "sid=abc");
   });
 });

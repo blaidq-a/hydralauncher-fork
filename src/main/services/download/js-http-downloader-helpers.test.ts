@@ -6,6 +6,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { describe, it } from "node:test";
 import {
+  applySegmentSplit,
   areDownloadByteRangesComplete,
   areDownloadByteRangesContiguous,
   createDownloadByteRanges,
@@ -283,5 +284,53 @@ describe("createDownloadByteRanges", () => {
     assert.equal(Buffer.compare(diskData, expectedData), 0);
 
     await fs.rm(temporaryDirectory, { recursive: true, force: true });
+  });
+});
+
+describe("applySegmentSplit", () => {
+  it("keeps other segment indices stable and never duplicates ranges", () => {
+    const ranges = createDownloadByteRanges(400, 4);
+    const offsets = [100, 30, 0, 0];
+    const retryCounts = [0, 0, 0, 0];
+    const runningSegmentRange = ranges[2];
+    const split = splitDownloadByteRange(ranges[1], offsets[1], 10);
+    assert.ok(split);
+
+    // ranges and the checkpoint ranges are the same array in the downloader.
+    const rightIndex = applySegmentSplit(
+      { ranges, checkpointRanges: ranges, offsets, retryCounts },
+      1,
+      split[0],
+      split[1]
+    );
+
+    assert.equal(rightIndex, 4);
+    assert.equal(ranges.length, 5);
+    assert.equal(offsets.length, ranges.length);
+    assert.equal(retryCounts.length, ranges.length);
+    // A segment that was running during the split still points at its range.
+    assert.equal(ranges[2], runningSegmentRange);
+    assert.equal(offsets[1], 30);
+    assert.equal(offsets[4], 0);
+    assert.equal(areDownloadByteRangesContiguous(ranges, 400), true);
+  });
+
+  it("updates a separate checkpoint copy without double inserting", () => {
+    const ranges = createDownloadByteRanges(400, 2);
+    const checkpointRanges = ranges.map((range) => ({ ...range }));
+    const offsets = [0, 0];
+    const split = splitDownloadByteRange(ranges[0], 0, 10);
+    assert.ok(split);
+
+    applySegmentSplit(
+      { ranges, checkpointRanges, offsets, retryCounts: [0, 0] },
+      0,
+      split[0],
+      split[1]
+    );
+
+    assert.equal(ranges.length, 3);
+    assert.equal(checkpointRanges.length, 3);
+    assert.equal(areDownloadByteRangesContiguous(checkpointRanges, 400), true);
   });
 });
