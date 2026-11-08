@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 
 import {
   cleanFolderGameTitle,
+  getArchiveFolderNames,
   isConfidentTitleMatch,
   pickConfidentTitleMatch,
 } from "./folder-game-title.js";
@@ -97,5 +98,23 @@ describe("pickConfidentTitleMatch", () => {
 
   it("returns null when nothing matches", () => {
     assert.equal(pickConfidentTitleMatch("Fortnite", results), null);
+  });
+});
+
+describe("getArchiveFolderNames", () => {
+  it("maps archives to the folder they are extracted into", () => {
+    assert.deepEqual(getArchiveFolderNames("God-of-War-SteamRIP.com.rar"), [
+      "god-of-war-steamrip.com",
+    ]);
+    assert.deepEqual(getArchiveFolderNames("Game.part1.rar"), [
+      "game.part1",
+      "game",
+    ]);
+    assert.deepEqual(getArchiveFolderNames("Game.7z.001"), ["game.7z"]);
+  });
+
+  it("ignores files that are not archives", () => {
+    assert.equal(getArchiveFolderNames("otozip.ps1"), null);
+    assert.equal(getArchiveFolderNames("Buckshot Roulette"), null);
   });
 });

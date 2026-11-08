@@ -1242,15 +1242,22 @@ const runScan = async (
 };
 
 let automaticScanRunning = false;
+let automaticScanRequestedWhileRunning = false;
 
 /**
  * Fork: background scan of the default locations (downloads path, Steam
  * libraries). Adds confidently identified games and links executables
- * without asking; uncertain matches are skipped.
+ * without asking; uncertain matches are skipped. A request that arrives
+ * while a scan is running (e.g. an archive finished extracting) runs once
+ * more afterwards instead of being dropped.
  */
-export const runAutomaticLibraryScan = async () => {
-  if (automaticScanRunning || inflightScans.size > 0) return;
+export const runAutomaticLibraryScan = async (): Promise<void> => {
+  if (automaticScanRunning || inflightScans.size > 0) {
+    automaticScanRequestedWhileRunning = true;
+    return;
+  }
   automaticScanRunning = true;
+  automaticScanRequestedWhileRunning = false;
 
   try {
     const result = await AchievementWatcherManager.runBatch(() =>
@@ -1263,6 +1270,11 @@ export const runAutomaticLibraryScan = async () => {
     logger.error("[ScanInstalledGames] Automatic scan failed:", error);
   } finally {
     automaticScanRunning = false;
+  }
+
+  if (automaticScanRequestedWhileRunning) {
+    automaticScanRequestedWhileRunning = false;
+    await runAutomaticLibraryScan();
   }
 };
 

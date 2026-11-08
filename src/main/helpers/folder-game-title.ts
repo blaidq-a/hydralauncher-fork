@@ -35,6 +35,25 @@ const RELEASE_TAG_PATTERN = new RegExp(
   "gi"
 );
 
+const ARCHIVE_EXTENSION_PATTERN = /\.(?:rar|zip|7z|\d{3})$/i;
+const ARCHIVE_PART_PATTERN = /\.part\d+$/i;
+
+/**
+ * Folder names an archive is extracted into ("Game.rar" -> "Game"; a
+ * multi-part "Game.part1.rar" -> "Game.part1" and "Game"), lower-cased.
+ * Returns null when the file is not an archive.
+ */
+export const getArchiveFolderNames = (fileName: string): string[] | null => {
+  if (!ARCHIVE_EXTENSION_PATTERN.test(fileName)) return null;
+
+  const baseName = fileName.replace(ARCHIVE_EXTENSION_PATTERN, "");
+  const withoutPart = baseName.replace(ARCHIVE_PART_PATTERN, "");
+
+  return [...new Set([baseName, withoutPart])]
+    .filter(Boolean)
+    .map((name) => name.toLowerCase());
+};
+
 /**
  * Version and build markers such as "v1.14.1k", "Build 12345", "Update 3".
  * Applied while dots are still present so "v1.14.1k" is removed as a whole.

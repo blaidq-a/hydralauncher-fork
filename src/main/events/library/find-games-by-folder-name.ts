@@ -7,6 +7,7 @@ import path from "node:path";
 
 import {
   cleanFolderGameTitle,
+  getArchiveFolderNames,
   pickConfidentTitleMatch,
 } from "@main/helpers/folder-game-title";
 import { findLikelyGameExecutableInFolder } from "@main/helpers/find-likely-game-executable";
@@ -14,8 +15,11 @@ import { downloadsSublevel } from "@main/level";
 import { logger } from "@main/services";
 import { HydraApi } from "@main/services/hydra-api";
 
-/** Folders touched more recently than this may still be extracting. */
-const SETTLE_TIME_MS = 2 * 60 * 1000;
+/**
+ * Folders touched more recently than this may still be written to. Archive
+ * extractions are detected separately (the archive is still present).
+ */
+const SETTLE_TIME_MS = 30 * 1000;
 const SEARCH_LIMIT = 8;
 
 interface CatalogueSuggestion {
@@ -89,6 +93,14 @@ export const findGamesByFolderName = async (options: {
   }
 
   const claimedKeys = [...options.claimedExecutablePaths].map(toKey);
+
+  // An archive next to a folder of the same name means it is still being
+  // extracted (Hydra and extraction scripts delete the archive when done).
+  const extractingFolderNames = new Set(
+    entries
+      .filter((entry) => entry.isFile())
+      .flatMap((entry) => getArchiveFolderNames(entry.name) ?? [])
+  );
   const busyFolders = await getBusyFolderKeys(downloadsPath).catch(
     () => new Set<string>()
   );
@@ -102,6 +114,12 @@ export const findGamesByFolderName = async (options: {
 
     if (claimedKeys.some((claimed) => isInside(claimed, folderKey))) continue;
     if (busyFolders.has(folderKey)) continue;
+    if (extractingFolderNames.has(entry.name.toLowerCase())) {
+      logger.info(
+        `[ScanInstalledGames] Waiting for "${entry.name}" to finish extracting`
+      );
+      continue;
+    }
 
     const stats = await fs.promises.stat(folderPath).catch(() => null);
     if (!stats || Date.now() - stats.mtimeMs < SETTLE_TIME_MS) continue;
