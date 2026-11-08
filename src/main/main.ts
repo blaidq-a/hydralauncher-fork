@@ -47,6 +47,7 @@ import { migrateEmulatorCloudSaveDefaults } from "./services/cloud-save/automati
 import { watchSteamLibraries } from "./services/steam-integration/steam-install-watcher";
 import { migrateGameVisibilityFields } from "./services/library-sync/game-visibility-migration";
 import { migrateForkDownloads } from "./services/download/fork-download-migration";
+import { startAutoLibraryScan } from "./services/auto-library-scan";
 import { UmuUpdater } from "./services/umu-updater";
 import { initializeScreenshots } from "./services/screenshots";
 import { setTrackedGamesRunningListenerErrorReporter } from "./services/game-running-state";
@@ -247,6 +248,7 @@ export const loadState = async () => {
   WindowManager.sendDownloadsUpdated();
 
   startMainLoop();
+  startAutoLibraryScan();
 
   if (process.platform === "win32") {
     CommonRedistManager.downloadCommonRedist();

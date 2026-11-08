@@ -5,6 +5,7 @@ import { chunk } from "lodash-es";
 import { registerEvent } from "../register-event";
 import { getGameAssets } from "../catalogue/get-game-assets";
 import { getDownloadsPath } from "../helpers/get-downloads-path";
+import { findGamesByFolderName } from "./find-games-by-folder-name";
 import {
   isRedistributableDirectory,
   isRedistributablePath,
@@ -1110,7 +1111,8 @@ const runScan = async (
   signal: CancelSignal,
   additionalDirectories: string[],
   includeDefaultDirectories: boolean,
-  addGamesToLibrary: boolean
+  addGamesToLibrary: boolean,
+  automatic = false
 ): Promise<ScanResult> => {
   if (!(await GameExecutables.ensureLoaded(true))) {
     throw new Error("game-executable-catalogue-unavailable");
@@ -1171,11 +1173,50 @@ const runScan = async (
           ambiguousMatches: [] as AmbiguousMatch[],
         };
 
+  // Fork: games the executable catalogue does not know are matched by their
+  // folder name in the downloads path (confident matches only).
+  const downloadsPath =
+    addGamesToLibrary && includeDefaultDirectories && !signal.cancelled
+      ? await getDownloadsPath().catch(() => null)
+      : null;
+  const folderNameMatches = downloadsPath
+    ? await findGamesByFolderName({
+        downloadsPath,
+        claimedExecutablePaths: [
+          ...claimedPaths,
+          ...steamPathByObjectId.values(),
+          ...outsideLibrary.pathByObjectId.values(),
+          ...outsideLibrary.ambiguousMatches.map(
+            (match) => match.executablePath
+          ),
+        ],
+        takenObjectIds: new Set([
+          ...libraryObjectIds,
+          ...steamPathByObjectId.keys(),
+          ...outsideLibrary.pathByObjectId.keys(),
+        ]),
+        isCancelled: () => signal.cancelled,
+      }).catch((error) => {
+        logger.error(
+          "[ScanInstalledGames] Folder name matching failed:",
+          error
+        );
+        return new Map<string, string>();
+      })
+    : new Map<string, string>();
+
   const addedGames = signal.cancelled
     ? []
     : await addGamesOutsideLibrary(
-        new Map([...steamPathByObjectId, ...outsideLibrary.pathByObjectId])
+        new Map([
+          ...steamPathByObjectId,
+          ...outsideLibrary.pathByObjectId,
+          ...folderNameMatches,
+        ])
       );
+
+  // Automatic scans never ask the user to choose between candidates.
+  if (automatic) outsideLibrary.ambiguousMatches = [];
 
   logger.info(
     `[ScanInstalledGames] Linked ${linkedGames.length} of ${gamesToScan.length} games in the library, added ${addedGames.length} new ones, ${outsideLibrary.ambiguousMatches.length} need a choice`
@@ -1183,7 +1224,8 @@ const runScan = async (
 
   WindowManager.sendToAppWindows("on-library-batch-complete");
 
-  if (!signal.cancelled) {
+  const hasChanges = addedGames.length + linkedGames.length > 0;
+  if (!signal.cancelled && (!automatic || hasChanges)) {
     await publishScanNotification(
       addedGames.length,
       linkedGames.length,
@@ -1197,6 +1239,31 @@ const runScan = async (
     ambiguousMatches: outsideLibrary.ambiguousMatches,
     total: gamesToScan.length,
   };
+};
+
+let automaticScanRunning = false;
+
+/**
+ * Fork: background scan of the default locations (downloads path, Steam
+ * libraries). Adds confidently identified games and links executables
+ * without asking; uncertain matches are skipped.
+ */
+export const runAutomaticLibraryScan = async () => {
+  if (automaticScanRunning || inflightScans.size > 0) return;
+  automaticScanRunning = true;
+
+  try {
+    const result = await AchievementWatcherManager.runBatch(() =>
+      runScan({ cancelled: false }, [], true, true, true)
+    );
+    logger.info(
+      `[ScanInstalledGames] Automatic scan added ${result.addedGames.length} and linked ${result.linkedGames.length} games`
+    );
+  } catch (error) {
+    logger.error("[ScanInstalledGames] Automatic scan failed:", error);
+  } finally {
+    automaticScanRunning = false;
+  }
 };
 
 registerEvent("scanInstalledGames", scanInstalledGames);
