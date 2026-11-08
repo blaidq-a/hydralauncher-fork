@@ -124,6 +124,35 @@ const MIN_BATCH_COMPLETION_RATIO = 0.95;
 const DEFAULT_REAL_DEBRID_CONNECTIONS = 4;
 const BUZZHEAVIER_RESOLVE_RETRY_DELAYS_MS = [1500, 3000];
 const MEGADB_REFERER = "https://steamrip.com/";
+// Fork: direct hosters throttle each connection, so the upstream default of
+// 4 parallel ranges is far slower than the old fork engine. Use the engine's
+// maximum (16); Gofile rate-limits (HTTP 429) above ~8 connections. The
+// engine still downgrades on its own when a host rejects parallel ranges.
+const HOSTER_PARALLEL_CONNECTIONS = 16;
+const HOSTER_PARALLEL_CONNECTIONS_BY_DOWNLOADER: Partial<
+  Record<Downloader, number>
+> = {
+  [Downloader.Gofile]: 8,
+};
+const DIRECT_HOSTER_DOWNLOADERS = new Set<Downloader>([
+  Downloader.Gofile,
+  Downloader.PixelDrain,
+  Downloader.Datanodes,
+  Downloader.Mediafire,
+  Downloader.FuckingFast,
+  Downloader.VikingFile,
+  Downloader.Rootz,
+  Downloader.FileKeeper,
+  Downloader.ArchiveOrg,
+  Downloader.MegaDB,
+  Downloader.Buzzheavier,
+]);
+
+const getHosterParallelConnections = (downloader: Downloader) =>
+  DIRECT_HOSTER_DOWNLOADERS.has(downloader)
+    ? (HOSTER_PARALLEL_CONNECTIONS_BY_DOWNLOADER[downloader] ??
+      HOSTER_PARALLEL_CONNECTIONS)
+    : undefined;
 
 interface JsDownloadOptions {
   url: string;
@@ -3517,7 +3546,13 @@ export class DownloadManager {
 
     this.logResolvedUrl(options.url);
     this.jsDownloader
-      .startDownload({ ...options, resourceId: download.uri })
+      .startDownload({
+        ...options,
+        parallelRangeConnections:
+          options.parallelRangeConnections ??
+          getHosterParallelConnections(download.downloader),
+        resourceId: download.uri,
+      })
       .catch((err) =>
         this.reportRuntimeDownloadError(downloadId, err, myGeneration)
       );
