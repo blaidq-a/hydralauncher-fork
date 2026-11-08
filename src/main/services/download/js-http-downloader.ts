@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
@@ -201,6 +202,8 @@ type SegmentedDownloadResult =
 interface ActiveSegmentedDownload extends SegmentedDownloadCheckpoint {
   targetPath: string;
   checkpointPath: string;
+  /** Old "<file>.hydra-segments.json" next to the download, removed once migrated. */
+  legacyCheckpointPath: string | null;
   lastCheckpointAt: number;
 }
 
@@ -237,8 +240,58 @@ function isDownloadByteRange(
   );
 }
 
-function getSegmentedCheckpointPath(filePath: string): string {
+let resolveSegmentedCheckpointDirectory: (() => string) | null = null;
+
+/**
+ * Stores segmented download checkpoints outside of the download folder so the
+ * "<file>.hydra-segments.json" bookkeeping file never shows up next to games.
+ * When unset (tests), checkpoints stay next to the downloaded file.
+ */
+export function setSegmentedCheckpointDirectory(
+  resolveDirectory: (() => string) | null
+) {
+  resolveSegmentedCheckpointDirectory = resolveDirectory;
+}
+
+function getLegacySegmentedCheckpointPath(filePath: string): string {
   return `${filePath}.hydra-segments.json`;
+}
+
+function getSegmentedCheckpointPath(filePath: string): string {
+  const segmentedCheckpointDirectory = resolveSegmentedCheckpointDirectory?.();
+  if (!segmentedCheckpointDirectory) {
+    return getLegacySegmentedCheckpointPath(filePath);
+  }
+
+  const resolved = path.resolve(filePath);
+  const key = process.platform === "win32" ? resolved.toLowerCase() : resolved;
+  const hash = createHash("sha1").update(key).digest("hex");
+
+  return path.join(segmentedCheckpointDirectory, `${hash}.json`);
+}
+
+function hasSegmentedCheckpoint(filePath: string): boolean {
+  return (
+    fs.existsSync(getSegmentedCheckpointPath(filePath)) ||
+    fs.existsSync(getLegacySegmentedCheckpointPath(filePath))
+  );
+}
+
+/** Removes every checkpoint file (current and legacy location) for a download. */
+export async function removeSegmentedCheckpointFiles(
+  filePath: string
+): Promise<void> {
+  const checkpointPaths = new Set([
+    getSegmentedCheckpointPath(filePath),
+    getLegacySegmentedCheckpointPath(filePath),
+  ]);
+
+  await Promise.all(
+    [...checkpointPaths].flatMap((checkpointPath) => [
+      fs.promises.rm(checkpointPath, { force: true }),
+      fs.promises.rm(`${checkpointPath}.tmp`, { force: true }),
+    ])
+  );
 }
 
 export class JsHttpDownloader {
@@ -610,7 +663,7 @@ export class JsHttpDownloader {
       const stats = fs.statSync(filePath);
       if (
         this.segmentedDownload?.targetPath !== filePath &&
-        !fs.existsSync(getSegmentedCheckpointPath(filePath))
+        !hasSegmentedCheckpoint(filePath)
       ) {
         startByte = stats.size;
       }
@@ -1029,7 +1082,16 @@ export class JsHttpDownloader {
     }
 
     const checkpointPath = getSegmentedCheckpointPath(targetPath);
-    const savedCheckpoint = await this.readSegmentedCheckpoint(checkpointPath);
+    const legacyCheckpointPath = getLegacySegmentedCheckpointPath(targetPath);
+    let savedCheckpoint = await this.readSegmentedCheckpoint(checkpointPath);
+    let migratedLegacyCheckpoint = false;
+    if (!savedCheckpoint && legacyCheckpointPath !== checkpointPath) {
+      // Resume downloads started by older builds that kept the checkpoint next
+      // to the file; it is moved to the new location on the next persist.
+      savedCheckpoint =
+        await this.readSegmentedCheckpoint(legacyCheckpointPath);
+      migratedLegacyCheckpoint = savedCheckpoint !== null;
+    }
     const initialSegmentCount = Math.max(
       maxConnections,
       Math.ceil(fileSize / MAX_SEGMENT_RANGE_BYTES)
@@ -1059,9 +1121,10 @@ export class JsHttpDownloader {
         "[JsHttpDownloader] Remote validators changed but the file size and saved byte ranges still match; preserving the partial offsets for resume"
       );
     }
-    const ranges = canResumeCheckpoint
-      ? savedCheckpoint.ranges.map((range) => ({ ...range }))
-      : initialRanges;
+    const ranges =
+      canResumeCheckpoint && savedCheckpoint
+        ? savedCheckpoint.ranges.map((range) => ({ ...range }))
+        : initialRanges;
     if (ranges.length < 2) return { kind: "unsupported" };
 
     let offsets =
@@ -1107,7 +1170,7 @@ export class JsHttpDownloader {
         if (this.pendingSegmentedFileDeletions.delete(targetPath)) {
           await Promise.all([
             fs.promises.rm(targetPath, { force: true }),
-            fs.promises.rm(checkpointPath, { force: true }),
+            removeSegmentedCheckpointFiles(targetPath),
           ]);
         }
       } finally {
@@ -1127,6 +1190,9 @@ export class JsHttpDownloader {
       lastModified,
       targetPath,
       checkpointPath,
+      legacyCheckpointPath: migratedLegacyCheckpoint
+        ? legacyCheckpointPath
+        : null,
       lastCheckpointAt: 0,
     };
     this.segmentedDownload = checkpoint;
@@ -1202,7 +1268,7 @@ export class JsHttpDownloader {
         clearTimeout(this.checkpointTimer);
         this.checkpointTimer = null;
       }
-      await fs.promises.rm(checkpointPath, { force: true });
+      await removeSegmentedCheckpointFiles(targetPath);
 
       this.status = "complete";
       this.retryCount = 0;
@@ -1266,12 +1332,12 @@ export class JsHttpDownloader {
         if (this.pendingSegmentedFileDeletions.delete(targetPath)) {
           await Promise.all([
             fs.promises.rm(targetPath, { force: true }),
-            fs.promises.rm(checkpointPath, { force: true }),
+            removeSegmentedCheckpointFiles(targetPath),
           ]);
         }
         if (fallbackToSingleConnection) {
           await fs.promises.truncate(targetPath, fallbackResumeByte);
-          await fs.promises.rm(checkpointPath, { force: true });
+          await removeSegmentedCheckpointFiles(targetPath);
           this.fileSize = fileSize;
           this.bytesDownloaded = fallbackResumeByte;
           this.resetSpeedTracking();
@@ -1886,8 +1952,15 @@ export class JsHttpDownloader {
         lastModified: checkpoint.lastModified,
       };
       const tempPath = `${checkpoint.checkpointPath}.tmp`;
+      fs.mkdirSync(path.dirname(checkpoint.checkpointPath), {
+        recursive: true,
+      });
       fs.writeFileSync(tempPath, JSON.stringify(serialized), "utf8");
       fs.renameSync(tempPath, checkpoint.checkpointPath);
+      if (checkpoint.legacyCheckpointPath) {
+        fs.rmSync(checkpoint.legacyCheckpointPath, { force: true });
+        checkpoint.legacyCheckpointPath = null;
+      }
       checkpoint.lastCheckpointAt = Date.now();
     };
 
@@ -2227,10 +2300,11 @@ export class JsHttpDownloader {
       deleteFile && this.currentOptions && this.status !== "complete"
         ? path.join(this.currentOptions.savePath, this.folderName)
         : null;
+    // Only hand the deletion to the segmented run when one is still in
+    // flight; a paused download has no running loop left to clean up, which
+    // used to leave the partial file and its checkpoint behind on cancel.
     const isSegmentedFile =
-      filePath !== null &&
-      (this.segmentedDownload?.targetPath === filePath ||
-        this.segmentedTargetHandleClosed !== null);
+      filePath !== null && this.segmentedTargetHandleClosed !== null;
     const streamsToClose = [
       ...(this.writeStream ? [this.writeStream] : []),
       ...this.segmentedWriteStreams,
@@ -2252,12 +2326,17 @@ export class JsHttpDownloader {
     await Promise.all(streamClosePromises);
     if (targetHandleClosed) await targetHandleClosed;
 
-    if (filePath && !isSegmentedFile) {
-      const checkpointPath = getSegmentedCheckpointPath(filePath);
+    // The segmented run removes its own entry once it deleted the files; if
+    // it is still queued here the run had already finished, so delete now.
+    const shouldDeleteFiles =
+      filePath !== null &&
+      (!isSegmentedFile || this.pendingSegmentedFileDeletions.delete(filePath));
+
+    if (filePath && shouldDeleteFiles) {
       try {
         await Promise.all([
           fs.promises.rm(filePath, { force: true }),
-          fs.promises.rm(checkpointPath, { force: true }),
+          removeSegmentedCheckpointFiles(filePath),
         ]);
         logger.log("[JsHttpDownloader] Deleted partial download files");
       } catch (error) {

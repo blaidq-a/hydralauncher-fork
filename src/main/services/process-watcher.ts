@@ -57,6 +57,10 @@ import {
 } from "./linux-game-capture-session";
 import { updateGameRecord } from "./game-record-updater";
 import { GameExecutables } from "./game-executables";
+import {
+  buildWindowsProcessIndex,
+  matchWindowsGameProcess,
+} from "./process-path-match";
 
 export { gamesPlaytime };
 export { isGameRunning } from "./game-running-state";
@@ -298,6 +302,9 @@ export const watchProcesses = async () => {
     linuxProcesses.map((process) => [process.pid, process])
   );
 
+  const windowsProcessIndex =
+    platform === "win32" ? buildWindowsProcessIndex(processMap) : null;
+
   for (const game of games) {
     const gameKey = levelKeys.game(game.shop, game.objectId);
     const executablePath = game.executablePath;
@@ -325,6 +332,12 @@ export const watchProcesses = async () => {
 
       if (processMap.get(executable)?.has(matchPath)) return true;
 
+      if (windowsProcessIndex) {
+        return matchWindowsGameProcess(matchPath, windowsProcessIndex, {
+          allowFolderMatch: false,
+        });
+      }
+
       if (platform === "linux") {
         return (
           hasLinuxNativeOrAppImageMatch(matchPath, linuxProcesses) ||
@@ -334,6 +347,16 @@ export const watchProcesses = async () => {
 
       return false;
     });
+
+    // Fall back to any process running from the game's own folder so games
+    // that hand off from a launcher to another binary are still tracked.
+    if (!matchedPath && windowsProcessIndex) {
+      matchedPath = matchPaths.find((matchPath) =>
+        matchWindowsGameProcess(matchPath, windowsProcessIndex, {
+          allowFolderMatch: true,
+        })
+      );
+    }
 
     if (
       !matchedPath &&

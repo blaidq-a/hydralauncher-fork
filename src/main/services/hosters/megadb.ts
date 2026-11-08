@@ -1,4 +1,5 @@
 import { BrowserWindow } from "electron";
+import { logger } from "../logger";
 
 const MEGADB_REFERER = "https://steamrip.com/";
 const MEGADB_USER_AGENT =
@@ -10,17 +11,68 @@ const TICK_MS = 700; // sayfa kaç ms'de bir taranır
 const CLICK_GAP_MS = 1500; // aynı butona tekrar basmadan önceki bekleme
 const FREE_CLICK_GAP_MS = 4000; // "Free Download" sonrası sayfa geçişi beklemesi
 const DIAG_AFTER_MS = 10000; // tıklanacak buton bulunamazsa loglama süresi
+// Çözülen direkt link bu süre boyunca yeniden kullanılmayı dener. MegaDB aynı
+// dosya için kısa sürede ikinci bir "Free Download" akışında bekleme/limit
+// sayfası gösterdiğinden, duraklatılan indirme yeniden başlatılamıyordu.
+const RESOLVED_URL_TTL_MS = 6 * 60 * 60 * 1000;
+const RESOLVED_URL_PROBE_TIMEOUT_MS = 15000;
+
+const resolvedUrlCache = new Map<string, { url: string; resolvedAt: number }>();
+const inFlightResolutions = new Map<string, Promise<string>>();
+
+async function isResolvedUrlStillValid(url: string): Promise<boolean> {
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(),
+    RESOLVED_URL_PROBE_TIMEOUT_MS
+  );
+
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      redirect: "follow",
+      signal: controller.signal,
+      headers: {
+        Range: "bytes=0-0",
+        Referer: MEGADB_REFERER,
+        "User-Agent": MEGADB_USER_AGENT,
+      },
+    });
+    const contentType = (
+      response.headers.get("content-type") ?? ""
+    ).toLowerCase();
+    await response.body?.cancel().catch(() => undefined);
+
+    return (
+      (response.status === 206 || response.status === 200) &&
+      !contentType.includes("text/html")
+    );
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 function isMegaDBHost(hostname: string): boolean {
   return MEGADB_HOSTS.some(
-    (host) => hostname.toLowerCase() === host || hostname.toLowerCase().endsWith(`.${host}`)
+    (host) =>
+      hostname.toLowerCase() === host ||
+      hostname.toLowerCase().endsWith(`.${host}`)
   );
 }
 
 function isTorrentLink(url?: string): boolean {
   if (!url) return false;
   const l = url.toLowerCase();
-  if (l.includes(".css") || l.includes(".js") || l.includes(".png") || l.includes(".jpg") || l.includes(".woff")) return false;
+  if (
+    l.includes(".css") ||
+    l.includes(".js") ||
+    l.includes(".png") ||
+    l.includes(".jpg") ||
+    l.includes(".woff")
+  )
+    return false;
   return /\.torrent(?:[?#]|\$)/i.test(l) || l.includes(".torrent");
 }
 
@@ -30,7 +82,14 @@ function isDirectDownloadLink(url?: string): boolean {
 
   const l = url.toLowerCase();
 
-  if (l.includes(".css") || l.includes(".js") || l.includes(".png") || l.includes(".jpg") || l.includes(".woff")) return false;
+  if (
+    l.includes(".css") ||
+    l.includes(".js") ||
+    l.includes(".png") ||
+    l.includes(".jpg") ||
+    l.includes(".woff")
+  )
+    return false;
   if (l.includes("steamrip.com") && !l.includes("download_token")) return false;
 
   if (l.includes("download_token=")) return true;
@@ -42,7 +101,8 @@ function isDirectDownloadLink(url?: string): boolean {
 
 export function getMegaDBPageUrl(uri: string): string {
   let cleanUri = (uri || "").trim();
-  if (cleanUri.includes("steamrip.com/http")) cleanUri = cleanUri.split("steamrip.com/").pop() || cleanUri;
+  if (cleanUri.includes("steamrip.com/http"))
+    cleanUri = cleanUri.split("steamrip.com/").pop() || cleanUri;
 
   try {
     const pageUrl = new URL(cleanUri);
@@ -170,7 +230,11 @@ const DIAG_SCRIPT = String.raw`(() => {
   return out;
 })()`;
 
-async function realClick(wc: Electron.WebContents, x: number, y: number): Promise<void> {
+async function realClick(
+  wc: Electron.WebContents,
+  x: number,
+  y: number
+): Promise<void> {
   const z = wc.getZoomFactor();
   const px = Math.round(x * z);
   const py = Math.round(y * z);
@@ -179,10 +243,22 @@ async function realClick(wc: Electron.WebContents, x: number, y: number): Promis
   wc.sendInputEvent({ type: "mouseMove", x: px, y: py });
   await sleep(60);
   if (wc.isDestroyed()) return;
-  wc.sendInputEvent({ type: "mouseDown", x: px, y: py, button: "left", clickCount: 1 });
+  wc.sendInputEvent({
+    type: "mouseDown",
+    x: px,
+    y: py,
+    button: "left",
+    clickCount: 1,
+  });
   await sleep(70);
   if (wc.isDestroyed()) return;
-  wc.sendInputEvent({ type: "mouseUp", x: px, y: py, button: "left", clickCount: 1 });
+  wc.sendInputEvent({
+    type: "mouseUp",
+    x: px,
+    y: py,
+    button: "left",
+    clickCount: 1,
+  });
 }
 
 export class MegaDBApi {
@@ -194,6 +270,10 @@ export class MegaDBApi {
     }
   }
 
+  public static invalidateCachedUrl(uri: string): void {
+    resolvedUrlCache.delete((uri || "").trim());
+  }
+
   public static async getDownloadUrl(uri: string): Promise<string> {
     const rawUri = (uri || "").trim();
 
@@ -202,6 +282,39 @@ export class MegaDBApi {
     }
     if (isDirectDownloadLink(rawUri)) return rawUri;
 
+    // Doğrulama ve başlatma aynı anda link isterse tek bir tarayıcı akışı paylaşılır.
+    const pending = inFlightResolutions.get(rawUri);
+    if (pending) return pending;
+
+    const resolution = (async () => {
+      const cached = resolvedUrlCache.get(rawUri);
+      if (cached && Date.now() - cached.resolvedAt < RESOLVED_URL_TTL_MS) {
+        if (await isResolvedUrlStillValid(cached.url)) {
+          logger.log(
+            "[MegaDB] Önceden çözülen indirme linki yeniden kullanılıyor."
+          );
+          return cached.url;
+        }
+        logger.log(
+          "[MegaDB] Önbellekteki link artık geçersiz; yeniden çözülüyor."
+        );
+        resolvedUrlCache.delete(rawUri);
+      }
+
+      const url = await MegaDBApi.resolveWithBrowser(rawUri);
+      resolvedUrlCache.set(rawUri, { url, resolvedAt: Date.now() });
+      return url;
+    })();
+
+    inFlightResolutions.set(rawUri, resolution);
+    try {
+      return await resolution;
+    } finally {
+      inFlightResolutions.delete(rawUri);
+    }
+  }
+
+  private static resolveWithBrowser(rawUri: string): Promise<string> {
     const pageUrl = getMegaDBPageUrl(rawUri);
 
     return new Promise<string>((resolve, reject) => {
@@ -243,7 +356,7 @@ export class MegaDBApi {
       const succeed = (url: string) => {
         if (finished) return;
         finished = true;
-        console.log("[MegaDB] Direkt indirme linki yakalandı.");
+        logger.log("[MegaDB] Direkt indirme linki yakalandı.");
         resolve(url);
         setImmediate(cleanup);
       };
@@ -260,11 +373,18 @@ export class MegaDBApi {
       wc.on("did-finish-load", () => {
         loads++;
         lastClickAt = 0;
-        console.log(`[MegaDB] Sayfa yüklendi (#${loads}): ${new URL(wc.getURL() || "about:blank").host}`);
+        logger.log(
+          `[MegaDB] Sayfa yüklendi (#${loads}): ${new URL(wc.getURL() || "about:blank").host}`
+        );
       });
 
       timeoutId = setTimeout(
-        () => fail(new Error(`MegaDB Reddedildi: ${TIMEOUT_MS / 1000} saniye içinde indirme bağlantısı alınamadı.`)),
+        () =>
+          fail(
+            new Error(
+              `MegaDB Reddedildi: ${TIMEOUT_MS / 1000} saniye içinde indirme bağlantısı alınamadı.`
+            )
+          ),
         TIMEOUT_MS
       );
 
@@ -289,7 +409,8 @@ export class MegaDBApi {
           fail(new Error("Bu dosya torrent lütfen başka bi hoster deneyin"));
           return;
         }
-        if (isDirectDownloadLink(details.redirectURL)) succeed(details.redirectURL);
+        if (isDirectDownloadLink(details.redirectURL))
+          succeed(details.redirectURL);
       });
 
       // 3. Tarayıcı indirmesini yakala
@@ -308,14 +429,19 @@ export class MegaDBApi {
         if (finished || busy || wc.isDestroyed()) return;
         busy = true;
         try {
-          const probe = (await wc.executeJavaScript(PROBE_SCRIPT)) as ProbeResult | null;
+          const probe = (await wc.executeJavaScript(
+            PROBE_SCRIPT
+          )) as ProbeResult | null;
           if (finished || !probe) return;
 
           const here = stripHash(wc.getURL());
 
           // Torrent linki tespit edilirse direkt torrent uyarısı ver
           const torrentDirect = probe.links.find(
-            (l) => stripHash(l) !== here && stripHash(l) !== stripHash(pageUrl) && isTorrentLink(l)
+            (l) =>
+              stripHash(l) !== here &&
+              stripHash(l) !== stripHash(pageUrl) &&
+              isTorrentLink(l)
           );
           if (torrentDirect) {
             fail(new Error("Bu dosya torrent lütfen başka bi hoster deneyin"));
@@ -323,7 +449,10 @@ export class MegaDBApi {
           }
 
           const direct = probe.links.find(
-            (l) => stripHash(l) !== here && stripHash(l) !== stripHash(pageUrl) && isDirectDownloadLink(l)
+            (l) =>
+              stripHash(l) !== here &&
+              stripHash(l) !== stripHash(pageUrl) &&
+              isDirectDownloadLink(l)
           );
           if (direct) {
             succeed(direct);
@@ -333,27 +462,41 @@ export class MegaDBApi {
           const t = probe.target;
           if (!t) {
             const now = Date.now();
-            if (now - lastSeenTargetAt > DIAG_AFTER_MS && now - lastDiagAt > DIAG_AFTER_MS) {
+            if (
+              now - lastSeenTargetAt > DIAG_AFTER_MS &&
+              now - lastDiagAt > DIAG_AFTER_MS
+            ) {
               lastDiagAt = now;
-              const seen = (await wc.executeJavaScript(DIAG_SCRIPT)) as string[];
-              console.log("[MegaDB] Basılacak buton bulunamadı. Sayfadaki butonlar:", seen);
+              const seen = (await wc.executeJavaScript(
+                DIAG_SCRIPT
+              )) as string[];
+              logger.log(
+                "[MegaDB] Basılacak buton bulunamadı. Sayfadaki butonlar:",
+                seen
+              );
             }
             return;
           }
           lastSeenTargetAt = Date.now();
 
           const gap = t.kind === "free" ? FREE_CLICK_GAP_MS : CLICK_GAP_MS;
-          if (t.kind === lastClickKind && Date.now() - lastClickAt < gap) return;
+          if (t.kind === lastClickKind && Date.now() - lastClickAt < gap)
+            return;
 
           lastClickAt = Date.now();
           lastClickKind = t.kind;
           clicks++;
-          console.log(
-            `[MegaDB] Tık #${clicks} -> ${t.kind} "${t.text}"` + (t.covered ? " (üstü kapalı, reklam katmanı olabilir)" : "")
+          logger.log(
+            `[MegaDB] Tık #${clicks} -> ${t.kind} "${t.text}"` +
+              (t.covered ? " (üstü kapalı, reklam katmanı olabilir)" : "")
           );
           await realClick(wc, t.x, t.y);
         } catch (err) {
-          if (errorLogs++ < 3) console.warn("[MegaDB] tick hatası:", (err as Error)?.message ?? err);
+          if (errorLogs++ < 3)
+            logger.warn(
+              "[MegaDB] tick hatası:",
+              (err as Error)?.message ?? err
+            );
         } finally {
           busy = false;
         }
@@ -361,7 +504,10 @@ export class MegaDBApi {
       tickId = setInterval(tick, TICK_MS);
 
       win
-        .loadURL(pageUrl, { userAgent: MEGADB_USER_AGENT, httpReferrer: MEGADB_REFERER })
+        .loadURL(pageUrl, {
+          userAgent: MEGADB_USER_AGENT,
+          httpReferrer: MEGADB_REFERER,
+        })
         .catch((err: { code?: string; errno?: number; message?: string }) => {
           if (err?.code === "ERR_ABORTED" || err?.errno === -3) return;
           fail(new Error(`MegaDB sayfası açılamadı: ${err?.message ?? err}`));

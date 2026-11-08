@@ -2,6 +2,7 @@ import { ASSETS_PATH } from "@main/constants";
 import { getGameAssets } from "@main/events/catalogue/get-game-assets";
 import { getDirectorySize } from "@main/events/helpers/get-directory-size";
 import { findGameExecutableInFolder } from "@main/helpers/find-game-executable";
+import { findLikelyGameExecutableInFolder } from "@main/helpers/find-likely-game-executable";
 import { updateGameExecutablePath } from "@main/helpers/update-executable-path";
 import { runAchievementMetadataExport } from "@main/services/achievements/metadata-export";
 import { db, downloadsSublevel, gamesSublevel, levelKeys } from "@main/level";
@@ -176,13 +177,17 @@ export class GameFilesManager {
   }
 
   async isArchiveFile(filePath: string): Promise<boolean> {
+    if (
+      FILE_EXTENSIONS_TO_EXTRACT.some((ext) =>
+        filePath.toLowerCase().endsWith(ext)
+      )
+    ) {
+      return true;
+    }
+
     try {
       const detected = await fileTypeFromFile(filePath);
       if (!detected) return false;
-
-      if (FILE_EXTENSIONS_TO_EXTRACT.some((ext) => filePath.toLowerCase().endsWith(ext))) {
-        return true;
-      }
 
       return GameFilesManager.isArchiveMimeType(detected.mime);
     } catch {
@@ -510,12 +515,6 @@ export class GameFilesManager {
         return;
       }
 
-      const executables = GameExecutables.getExecutablesForGame(this.objectId);
-
-      if (!executables || executables.length === 0) {
-        return;
-      }
-
       if (!download.folderName) {
         return;
       }
@@ -525,14 +524,25 @@ export class GameFilesManager {
         download.folderName
       );
 
-      if (!fs.existsSync(gameFolderPath)) {
+      const folderStats = await fs.promises
+        .stat(gameFolderPath)
+        .catch(() => null);
+
+      if (!folderStats?.isDirectory()) {
         return;
       }
 
-      const foundExePath = await findGameExecutableInFolder(
-        gameFolderPath,
-        executables
-      );
+      await GameExecutables.ensureLoaded().catch(() => false);
+
+      const executables = GameExecutables.getExecutablesForGame(this.objectId);
+
+      // Prefer the curated catalogue; fall back to a conservative heuristic so
+      // games from every hoster (not only catalogued ones) get an executable.
+      const foundExePath =
+        (executables?.length
+          ? await findGameExecutableInFolder(gameFolderPath, executables)
+          : null) ??
+        (await findLikelyGameExecutableInFolder(gameFolderPath, game.title));
 
       if (foundExePath) {
         logger.info(
@@ -878,7 +888,9 @@ export class GameFilesManager {
 
     const localFileSize = fs.statSync(filePath).size;
     if (localFileSize <= 0) {
-      await this.failExtraction(new Error(`Archive file is empty: ${filePath}`));
+      await this.failExtraction(
+        new Error(`Archive file is empty: ${filePath}`)
+      );
       return false;
     }
 
@@ -926,7 +938,9 @@ export class GameFilesManager {
 
         await downloadsSublevel.put(this.gameKey, {
           ...download,
-          folderName: path.parse(download.folderName!).name,
+          // Use the real extraction folder; for archives without an extension
+          // it is "<name>-extracted", not the archive file name itself.
+          folderName: path.basename(extractionPath),
         });
 
         await this.setExtractionComplete();

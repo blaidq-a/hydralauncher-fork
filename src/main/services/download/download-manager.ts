@@ -42,7 +42,10 @@ import { AllDebridClient } from "./all-debrid";
 import {
   DEFAULT_DOWNLOAD_USER_AGENT,
   JsHttpDownloader,
+  removeSegmentedCheckpointFiles,
+  setSegmentedCheckpointDirectory,
 } from "./js-http-downloader";
+import { SystemPath } from "../system-path";
 import {
   clampProgress,
   isRetryableHttpStatus,
@@ -91,6 +94,14 @@ interface AllDebridBatchState {
   bytesAtLastSpeedUpdate: number;
   batchSpeed: number;
 }
+
+const JS_PROGRESS_WATCHER_SKIP_MS = 1500;
+
+// Keep segmented download checkpoints in app data instead of next to games.
+// Resolved lazily so a customised userData path is honoured.
+setSegmentedCheckpointDirectory(() =>
+  path.join(SystemPath.getPath("userData"), "download-checkpoints")
+);
 
 export class DownloadManager {
   private static downloadingGameId: string | null = null;
@@ -664,7 +675,17 @@ export class DownloadManager {
 
     if (await this.haltDownloadIfStorageIsFull(download, game, gameId)) return;
 
-    this.sendProgressUpdate(progress, status, game);
+    // The JS downloader already pushes throttled progress on its own; only
+    // send from the watcher when that stream has gone quiet (e.g. stalls) or
+    // the download just finished, to avoid redundant renderer re-renders.
+    const jsProgressIsFresh =
+      this.usingJsDownloader &&
+      progress < 1 &&
+      Date.now() - this.lastJsProgressPublish < JS_PROGRESS_WATCHER_SKIP_MS;
+
+    if (!jsProgressIsFresh) {
+      this.sendProgressUpdate(progress, status, game);
+    }
 
     if (
       shouldFinalizeDownload({
@@ -983,12 +1004,16 @@ export class DownloadManager {
 
     const extractionStats = fs.statSync(extractionPath);
 
-    if (
+    // Some hosters (MegaDB, Buzzheavier, ...) serve archives without a usable
+    // extension, so sniff the file contents before giving up on extraction.
+    const isArchive =
       extractionStats.isFile() &&
-      FILE_EXTENSIONS_TO_EXTRACT.some((ext) =>
+      (FILE_EXTENSIONS_TO_EXTRACT.some((ext) =>
         folderName?.toLowerCase().endsWith(ext)
-      )
-    ) {
+      ) ||
+        (await gameFilesManager.isArchiveFile(extractionPath)));
+
+    if (isArchive) {
       await gameFilesManager.extractDownloadedFile().catch((error) => {
         logger.error(
           "[DownloadManager] Failed to extract downloaded file",
@@ -1179,7 +1204,7 @@ export class DownloadManager {
     try {
       seedStatus = await TorrentService.call<LibtorrentPayload[] | []>(
         "seed_status"
-      ).then((res) => res.data);
+      ).then((res) => (Array.isArray(res?.data) ? res.data : []));
     } catch (error) {
       logger.error("[DownloadManager] Torrent seed status poll failed", error);
       WindowManager.sendToAppWindows("on-seeding-status", []);
@@ -1280,7 +1305,7 @@ export class DownloadManager {
         const filePath = path.join(download.downloadPath, download.folderName);
         await Promise.all([
           fs.promises.rm(filePath, { force: true }),
-          fs.promises.rm(`${filePath}.hydra-segments.json`, { force: true }),
+          removeSegmentedCheckpointFiles(filePath),
         ]);
       }
 

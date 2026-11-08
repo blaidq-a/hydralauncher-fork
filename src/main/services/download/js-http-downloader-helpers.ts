@@ -123,40 +123,62 @@ export function createPositionalWriteStream(
 ): Writable {
   let position = startPosition;
 
+  const writeBuffer = async (buffer: Buffer) => {
+    let totalWritten = 0;
+    let offset = 0;
+
+    while (offset < buffer.length) {
+      if (signal.aborted) {
+        throw new Error("Segmented file write was aborted.");
+      }
+
+      const result = await fileHandle.write(
+        buffer,
+        offset,
+        buffer.length - offset,
+        position + totalWritten
+      );
+      if (result.bytesWritten <= 0) {
+        throw new Error("The target file write made no progress.");
+      }
+
+      totalWritten += result.bytesWritten;
+      offset += result.bytesWritten;
+    }
+
+    position += totalWritten;
+    await onWritten(totalWritten);
+  };
+
+  const toBuffer = (chunk: Buffer | string) =>
+    Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+
+  const finish =
+    (callback: (error?: Error | null) => void) => (error?: unknown) =>
+      callback(
+        error === undefined
+          ? null
+          : error instanceof Error
+            ? error
+            : new Error(String(error))
+      );
+
   return new Writable({
     highWaterMark,
     write: (chunk: Buffer | string, _encoding, callback) => {
-      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-      void (async () => {
-        let totalWritten = 0;
-        let offset = 0;
-
-        while (offset < buffer.length) {
-          if (signal.aborted) {
-            throw new Error("Segmented file write was aborted.");
-          }
-
-          const result = await fileHandle.write(
-            buffer,
-            offset,
-            buffer.length - offset,
-            position + totalWritten
-          );
-          if (result.bytesWritten <= 0) {
-            throw new Error("The target file write made no progress.");
-          }
-
-          totalWritten += result.bytesWritten;
-          offset += result.bytesWritten;
-        }
-
-        position += totalWritten;
-        await onWritten(totalWritten);
-      })()
-        .then(() => callback())
-        .catch((error: unknown) =>
-          callback(error instanceof Error ? error : new Error(String(error)))
-        );
+      writeBuffer(toBuffer(chunk)).then(() => callback(), finish(callback));
+    },
+    // Network chunks are small (16-64 KiB). While a write is in flight, Node
+    // buffers the following chunks and hands them over here, so they are
+    // coalesced into a single positional write. This keeps the libuv thread
+    // pool (shared with image loading and other fs work) from being flooded
+    // by tiny writes across many parallel connections.
+    writev: (chunks, callback) => {
+      const buffer =
+        chunks.length === 1
+          ? toBuffer(chunks[0].chunk)
+          : Buffer.concat(chunks.map(({ chunk }) => toBuffer(chunk)));
+      writeBuffer(buffer).then(() => callback(), finish(callback));
     },
   });
 }

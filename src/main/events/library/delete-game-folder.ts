@@ -2,7 +2,12 @@ import path from "node:path";
 import fs from "node:fs";
 
 import { getDownloadsPath } from "../helpers/get-downloads-path";
-import { DownloadOrchestrator, logger, retroarch } from "@main/services";
+import {
+  DownloadOrchestrator,
+  logger,
+  removeSegmentedCheckpointFiles,
+  retroarch,
+} from "@main/services";
 import { registerEvent } from "../register-event";
 import { isWithin } from "../emulators/rom-path-utils";
 import { GameShop } from "@types";
@@ -53,6 +58,9 @@ const deleteGameFolder = async (
 
     await deleteFile(folderPath, true);
     await deleteFile(metaPath);
+    await removeSegmentedCheckpointFiles(folderPath).catch((error) => {
+      logger.warn("Failed to remove segmented download checkpoint", error);
+    });
   }
 
   await downloadsSublevel.del(gameKey);

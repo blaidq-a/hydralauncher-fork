@@ -150,7 +150,25 @@ function discoverVisualStudioGenerator() {
       "No Visual Studio C++ toolchain found. Install the Desktop development with C++ workload."
     );
   }
-  return `Visual Studio ${installation.installationVersion.split(".")[0]} ${installation.catalog.productLineVersion}`;
+  const majorVersion = installation.installationVersion.split(".")[0];
+  // Newer Visual Studio releases report productLineVersion as the major
+  // version ("18") instead of the year CMake expects ("2026").
+  const productLineVersion = String(installation.catalog.productLineVersion);
+  const yearByMajorVersion = {
+    15: "2017",
+    16: "2019",
+    17: "2022",
+    18: "2026",
+  };
+  const year = /^\d{4}$/.test(productLineVersion)
+    ? productLineVersion
+    : yearByMajorVersion[majorVersion];
+  if (!year) {
+    throw new Error(
+      `Unsupported Visual Studio version ${installation.installationVersion}. Set CMAKE_GENERATOR to override.`
+    );
+  }
+  return `Visual Studio ${majorVersion} ${year}`;
 }
 
 function getGeneratorArgs(arch) {
