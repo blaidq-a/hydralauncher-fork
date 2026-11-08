@@ -7,10 +7,20 @@ import {
   filterDownloadableRepacks,
 } from "@shared";
 import { orderBy } from "lodash-es";
+import { Feature, useFeature } from "../use-feature.hook";
 
 export type DownloadOptionsEmptyStateReason =
   | "no-configured-sources"
+  | "no-game-sources"
   | "no-download-options";
+
+// Fork: never short-circuit to "no-game-sources". The API's per-game source
+// list does not include the user's own sources, so always query them.
+function getKnownGameSourcesEmptyStateReason(
+  _downloadSources: string[] | undefined
+): DownloadOptionsEmptyStateReason | null {
+  return null;
+}
 
 interface DownloadStateSetters {
   setDownloadOptions: (v: GameRepack[]) => void;
@@ -55,6 +65,19 @@ function setNoConfiguredSourcesState(
   });
 }
 
+function setKnownEmptyState(
+  signal: { cancelled: boolean },
+  setters: DownloadStateSetters,
+  reason: DownloadOptionsEmptyStateReason
+) {
+  applyIfNotCancelled(signal, () => {
+    setters.setDownloadOptions([]);
+    setters.setIsCheckingSources(false);
+    setters.setIsLoading(false);
+    setters.setEmptyStateReason(reason);
+  });
+}
+
 function startRemoteDownloadOptionsLoading(
   signal: { cancelled: boolean },
   setters: DownloadStateSetters
@@ -95,7 +118,9 @@ function setNoDownloadOptionsState(
 async function fetchDownloadOptions(
   game: Pick<Game, "objectId" | "shop">,
   signal: { cancelled: boolean },
-  setters: DownloadStateSetters
+  setters: DownloadStateSetters,
+  knownGameSourcesEmptyStateReason: DownloadOptionsEmptyStateReason | null,
+  multipartHosterDownloads: boolean
 ) {
   resetDownloadOptionsState(signal, setters);
 
@@ -120,6 +145,11 @@ async function fetchDownloadOptions(
     return;
   }
 
+  if (knownGameSourcesEmptyStateReason !== null) {
+    setKnownEmptyState(signal, setters, knownGameSourcesEmptyStateReason);
+    return;
+  }
+
   startRemoteDownloadOptionsLoading(signal, setters);
 
   try {
@@ -136,7 +166,7 @@ async function fetchDownloadOptions(
       needsAuth: false,
     });
     const options = Array.isArray(response)
-      ? filterDownloadableRepacks(response)
+      ? filterDownloadableRepacks(response, multipartHosterDownloads)
       : [];
 
     setDownloadOptionsSuccessState(signal, setters, options);
@@ -160,21 +190,37 @@ async function fetchDownloadOptions(
 }
 
 export function useGameDownloadOptions(
-  game: Pick<Game, "objectId" | "shop">,
+  game: Pick<Game, "objectId" | "shop"> & {
+    downloadSources?: string[];
+  },
   visible: boolean
 ) {
   const shouldLoadDownloadOptions =
     visible && IS_DESKTOP && game.shop !== "custom";
+  const { isFeatureEnabled } = useFeature();
+  const multipartHosterDownloads = isFeatureEnabled(
+    Feature.MultipartHosterDownloads
+  );
+  const knownGameSourcesEmptyStateReason = getKnownGameSourcesEmptyStateReason(
+    game.downloadSources
+  );
+  const downloadSourcesDependencyKey = Array.isArray(game.downloadSources)
+    ? game.downloadSources.join("|")
+    : "__unknown__";
   const [downloadOptions, setDownloadOptions] = useState<GameRepack[]>([]);
   const [localDownloadSources, setLocalDownloadSources] = useState<
     DownloadSource[]
   >([]);
   const [isCheckingSources, setIsCheckingSources] = useState(
-    shouldLoadDownloadOptions
+    shouldLoadDownloadOptions && knownGameSourcesEmptyStateReason === null
   );
-  const [isLoading, setIsLoading] = useState(shouldLoadDownloadOptions);
+  const [isLoading, setIsLoading] = useState(
+    shouldLoadDownloadOptions && knownGameSourcesEmptyStateReason === null
+  );
   const [emptyStateReason, setEmptyStateReason] =
-    useState<DownloadOptionsEmptyStateReason | null>(null);
+    useState<DownloadOptionsEmptyStateReason | null>(
+      shouldLoadDownloadOptions ? knownGameSourcesEmptyStateReason : null
+    );
 
   useEffect(() => {
     if (!shouldLoadDownloadOptions) {
@@ -186,20 +232,42 @@ export function useGameDownloadOptions(
       return;
     }
 
+    if (knownGameSourcesEmptyStateReason !== null) {
+      setDownloadOptions([]);
+      setLocalDownloadSources([]);
+      setIsCheckingSources(false);
+      setIsLoading(false);
+      setEmptyStateReason(knownGameSourcesEmptyStateReason);
+      return;
+    }
+
     const signal = { cancelled: false };
 
-    void fetchDownloadOptions(game, signal, {
-      setDownloadOptions,
-      setLocalDownloadSources,
-      setIsCheckingSources,
-      setIsLoading,
-      setEmptyStateReason,
-    });
+    void fetchDownloadOptions(
+      game,
+      signal,
+      {
+        setDownloadOptions,
+        setLocalDownloadSources,
+        setIsCheckingSources,
+        setIsLoading,
+        setEmptyStateReason,
+      },
+      knownGameSourcesEmptyStateReason,
+      multipartHosterDownloads
+    );
 
     return () => {
       signal.cancelled = true;
     };
-  }, [game.objectId, game.shop, shouldLoadDownloadOptions]);
+  }, [
+    downloadSourcesDependencyKey,
+    game.objectId,
+    game.shop,
+    knownGameSourcesEmptyStateReason,
+    multipartHosterDownloads,
+    shouldLoadDownloadOptions,
+  ]);
 
   return {
     downloadOptions,

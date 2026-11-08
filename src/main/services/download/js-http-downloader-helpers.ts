@@ -1,272 +1,129 @@
+import path from "node:path";
 import type { FileHandle } from "node:fs/promises";
-import { Writable } from "node:stream";
+
+export const INCOMPLETE_BATCH_PROGRESS_LIMIT = 0.9999;
+const BATCH_SPEED_SAMPLE_INTERVAL_SECONDS = 1;
+
+interface JsBatchProgressInput {
+  currentIndex: number;
+  activeIndex: number;
+  completedBytes: number;
+  totalBytes: number;
+  entryCount: number;
+  fileBytes: number;
+  fileProgress: number;
+}
+
+export function getJsBatchProgress(input: JsBatchProgressInput) {
+  const currentBytes =
+    input.activeIndex === input.currentIndex ? input.fileBytes : 0;
+  const currentProgress =
+    input.activeIndex === input.currentIndex ? input.fileProgress : 0;
+  const progress =
+    input.totalBytes > 0
+      ? (input.completedBytes + currentBytes) / input.totalBytes
+      : (input.currentIndex + currentProgress) / Math.max(input.entryCount, 1);
+
+  // The final 100% is set only after the last file has been banked.
+  return {
+    currentBytes,
+    progress: Math.min(Math.max(progress, 0), INCOMPLETE_BATCH_PROGRESS_LIMIT),
+  };
+}
+
+export interface JsBatchSpeedSample {
+  lastSpeedUpdate: number;
+  bytesAtLastSpeedUpdate: number | null;
+  batchSpeed: number;
+}
+
+export function sampleJsBatchSpeed(
+  previous: JsBatchSpeedSample,
+  bytesDownloaded: number,
+  fileSpeed: number,
+  now: number
+): JsBatchSpeedSample {
+  if (
+    previous.bytesAtLastSpeedUpdate === null ||
+    bytesDownloaded < previous.bytesAtLastSpeedUpdate
+  ) {
+    return {
+      lastSpeedUpdate: now,
+      bytesAtLastSpeedUpdate: bytesDownloaded,
+      batchSpeed: Math.max(0, fileSpeed),
+    };
+  }
+
+  const elapsed = (now - previous.lastSpeedUpdate) / 1000;
+  if (elapsed < BATCH_SPEED_SAMPLE_INTERVAL_SECONDS) return previous;
+
+  return {
+    lastSpeedUpdate: now,
+    bytesAtLastSpeedUpdate: bytesDownloaded,
+    batchSpeed: Math.max(
+      0,
+      (bytesDownloaded - previous.bytesAtLastSpeedUpdate) / elapsed
+    ),
+  };
+}
+
+export class ResumePrefixMismatchError extends Error {
+  constructor() {
+    super("The remote archive changed since the partial download was saved.");
+    this.name = "ResumePrefixMismatchError";
+  }
+}
+
+export async function verifyResumePrefixChunk(
+  file: FileHandle,
+  remoteChunk: Uint8Array,
+  offset: number,
+  length: number
+): Promise<void> {
+  const localChunk = Buffer.allocUnsafe(length);
+  await readResumePrefix(file, localChunk, offset);
+
+  if (!localChunk.equals(Buffer.from(remoteChunk.subarray(0, length)))) {
+    throw new ResumePrefixMismatchError();
+  }
+}
+
+async function readResumePrefix(
+  file: FileHandle,
+  buffer: Buffer,
+  offset: number,
+  bytesRead = 0
+): Promise<void> {
+  if (bytesRead === buffer.length) return;
+  const result = await file.read(
+    buffer,
+    bytesRead,
+    buffer.length - bytesRead,
+    offset + bytesRead
+  );
+  if (result.bytesRead === 0) throw new ResumePrefixMismatchError();
+  return readResumePrefix(file, buffer, offset, bytesRead + result.bytesRead);
+}
+
+export function chooseDownloadOutputPath(
+  filePath: string,
+  savePath: string,
+  headerFilename: string | undefined,
+  preserveFilename: boolean
+): { filePath: string; filename: string } {
+  if (preserveFilename || !headerFilename) {
+    return { filePath, filename: path.relative(savePath, filePath) };
+  }
+
+  return {
+    filePath: path.join(savePath, headerFilename),
+    filename: headerFilename,
+  };
+}
 
 export const PROGRESS_RESET_THRESHOLD_BYTES = 16 * 1024 * 1024;
 export const MAX_BUDGET_RESETS = 50;
 export const MAX_RESTARTS_FROM_ZERO = 3;
-export const MIN_SEGMENTED_DOWNLOAD_SIZE = 32 * 1024 * 1024;
-export const MAX_SEGMENT_RANGE_BYTES = 64 * 1024 * 1024;
-export const MIN_DYNAMIC_SPLIT_RANGE_BYTES = 8 * 1024 * 1024;
-export const SEGMENTED_DOWNLOAD_CONNECTIONS = 10;
-export const MAX_SEGMENTED_DOWNLOAD_CONNECTIONS = 20;
-
-export interface DownloadByteRange {
-  start: number;
-  end: number;
-}
-
-export function areDownloadByteRangesContiguous(
-  ranges: DownloadByteRange[],
-  totalBytes: number
-): boolean {
-  if (
-    !Number.isSafeInteger(totalBytes) ||
-    totalBytes <= 0 ||
-    ranges.length === 0
-  ) {
-    return false;
-  }
-
-  const orderedRanges = [...ranges].sort(
-    (left, right) => left.start - right.start
-  );
-  if (orderedRanges[0].start !== 0) return false;
-
-  for (let index = 0; index < orderedRanges.length; index++) {
-    const range = orderedRanges[index];
-    if (
-      !Number.isSafeInteger(range.start) ||
-      !Number.isSafeInteger(range.end) ||
-      range.start < 0 ||
-      range.end < range.start ||
-      (index > 0 && orderedRanges[index - 1].end + 1 !== range.start)
-    ) {
-      return false;
-    }
-  }
-
-  return orderedRanges.at(-1)?.end === totalBytes - 1;
-}
-
-export function areDownloadByteRangesComplete(
-  ranges: DownloadByteRange[],
-  offsets: number[],
-  totalBytes: number
-): boolean {
-  return (
-    areDownloadByteRangesContiguous(ranges, totalBytes) &&
-    ranges.length === offsets.length &&
-    ranges.every(
-      (range, index) => offsets[index] === range.end - range.start + 1
-    )
-  );
-}
-
-export function isDownloadCompleteOnDisk(
-  actualBytes: number,
-  expectedBytes: number | null
-): boolean {
-  if (!Number.isSafeInteger(actualBytes) || actualBytes < 0) {
-    return false;
-  }
-
-  if (expectedBytes === null) {
-    return actualBytes > 0;
-  }
-
-  if (!Number.isSafeInteger(expectedBytes) || expectedBytes <= 0) {
-    return actualBytes > 0;
-  }
-
-  return actualBytes >= expectedBytes;
-}
-
-export interface SegmentSplitState {
-  ranges: DownloadByteRange[];
-  checkpointRanges: DownloadByteRange[];
-  offsets: number[];
-  retryCounts: number[];
-}
-
-/**
- * Applies a dynamic split of `segmentIndex` into `leftRange` + `rightRange`.
- *
- * The left part replaces the segment in place and the right part is appended
- * at the end, so the index of every other (possibly still running or queued)
- * segment stays valid. Inserting in the middle shifted those indices and made
- * running segments credit their bytes to the wrong range, which left holes in
- * the downloaded file. Returns the index of the new right segment.
- */
-export function applySegmentSplit(
-  state: SegmentSplitState,
-  segmentIndex: number,
-  leftRange: DownloadByteRange,
-  rightRange: DownloadByteRange
-): number {
-  const rightIndex = state.ranges.length;
-
-  state.ranges[segmentIndex] = leftRange;
-  state.ranges.push(rightRange);
-
-  // `ranges` and the checkpoint's ranges are usually the same array; only
-  // update the checkpoint separately when it is a distinct copy.
-  if (state.checkpointRanges !== state.ranges) {
-    state.checkpointRanges[segmentIndex] = leftRange;
-    state.checkpointRanges.push(rightRange);
-  }
-
-  state.offsets.push(0);
-  state.retryCounts.push(0);
-
-  return rightIndex;
-}
-
-export function splitDownloadByteRange(
-  range: DownloadByteRange,
-  completedBytes: number,
-  minimumRangeBytes = MIN_DYNAMIC_SPLIT_RANGE_BYTES
-): [DownloadByteRange, DownloadByteRange] | null {
-  const rangeSize = range.end - range.start + 1;
-  if (
-    !Number.isSafeInteger(completedBytes) ||
-    completedBytes < 0 ||
-    completedBytes > rangeSize ||
-    !Number.isSafeInteger(minimumRangeBytes) ||
-    minimumRangeBytes <= 0 ||
-    rangeSize - completedBytes < minimumRangeBytes * 2
-  ) {
-    return null;
-  }
-
-  const splitLength = Math.max(completedBytes, Math.floor(rangeSize / 2));
-  if (rangeSize - splitLength < minimumRangeBytes) return null;
-
-  const leftRange = {
-    start: range.start,
-    end: range.start + splitLength - 1,
-  };
-  return [
-    leftRange,
-    {
-      start: leftRange.end + 1,
-      end: range.end,
-    },
-  ];
-}
-
-export type PositionalWriteStream = Writable & {
-  /**
-   * Resolves once every write handed to the file has finished and been
-   * reported through `onWritten`, even after the stream was destroyed.
-   */
-  whenIdle: () => Promise<void>;
-};
-
-export function createPositionalWriteStream(
-  fileHandle: FileHandle,
-  startPosition: number,
-  highWaterMark: number,
-  onWritten: (byteLength: number) => Promise<void>,
-  signal: AbortSignal
-): PositionalWriteStream {
-  let position = startPosition;
-  let inFlight: Promise<void> = Promise.resolve();
-  const track = (write: Promise<void>) => {
-    inFlight = write.catch(() => undefined);
-    return write;
-  };
-
-  const writeBuffer = async (buffer: Buffer) => {
-    let totalWritten = 0;
-    let offset = 0;
-
-    while (offset < buffer.length) {
-      if (signal.aborted) {
-        throw new Error("Segmented file write was aborted.");
-      }
-
-      const result = await fileHandle.write(
-        buffer,
-        offset,
-        buffer.length - offset,
-        position + totalWritten
-      );
-      if (result.bytesWritten <= 0) {
-        throw new Error("The target file write made no progress.");
-      }
-
-      totalWritten += result.bytesWritten;
-      offset += result.bytesWritten;
-    }
-
-    position += totalWritten;
-    await onWritten(totalWritten);
-  };
-
-  const toBuffer = (chunk: Buffer | string) =>
-    Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-
-  const finish =
-    (callback: (error?: Error | null) => void) => (error?: unknown) =>
-      callback(
-        error === undefined
-          ? null
-          : error instanceof Error
-            ? error
-            : new Error(String(error))
-      );
-
-  const stream = new Writable({
-    highWaterMark,
-    write: (chunk: Buffer | string, _encoding, callback) => {
-      track(writeBuffer(toBuffer(chunk))).then(
-        () => callback(),
-        finish(callback)
-      );
-    },
-    // Network chunks are small (16-64 KiB). While a write is in flight, Node
-    // buffers the following chunks and hands them over here, so they are
-    // coalesced into a single positional write. This keeps the libuv thread
-    // pool (shared with image loading and other fs work) from being flooded
-    // by tiny writes across many parallel connections.
-    writev: (chunks, callback) => {
-      const buffer =
-        chunks.length === 1
-          ? toBuffer(chunks[0].chunk)
-          : Buffer.concat(chunks.map(({ chunk }) => toBuffer(chunk)));
-      track(writeBuffer(buffer)).then(() => callback(), finish(callback));
-    },
-  });
-
-  return Object.assign(stream, { whenIdle: () => inFlight });
-}
-
-export function createDownloadByteRanges(
-  fileSize: number,
-  connectionCount = SEGMENTED_DOWNLOAD_CONNECTIONS
-): DownloadByteRange[] {
-  if (
-    !Number.isSafeInteger(fileSize) ||
-    fileSize <= 0 ||
-    !Number.isSafeInteger(connectionCount) ||
-    connectionCount <= 0
-  ) {
-    return [];
-  }
-
-  const count = Math.min(connectionCount, fileSize);
-  const bytesPerRange = Math.ceil(fileSize / count);
-  const ranges: DownloadByteRange[] = [];
-
-  for (let start = 0; start < fileSize; start += bytesPerRange) {
-    ranges.push({
-      start,
-      end: Math.min(start + bytesPerRange - 1, fileSize - 1),
-    });
-  }
-
-  return ranges;
-}
 
 export const RETRYABLE_ERROR_CODES = new Set([
   "ECONNRESET",

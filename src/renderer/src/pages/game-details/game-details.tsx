@@ -26,6 +26,7 @@ import {
   Downloader,
   getDownloadersForUri,
   getHosterDownloader,
+  getRepackUriParts,
 } from "@shared";
 import { CloudSyncFilesModal } from "./cloud-sync-files-modal/cloud-sync-files-modal";
 import { CloudSaveV2Provider } from "./cloud-save-v2";
@@ -47,12 +48,6 @@ export default function GameDetails() {
   const { t } = useTranslation("game_details");
 
   const navigate = useNavigate();
-
-  useEffect(() => {
-    if (shop !== "steam" || !objectId) return;
-
-    void window.electron.syncSteamGameOnGamePage(objectId).catch(() => {});
-  }, [objectId, shop]);
 
   useEffect(() => {
     setRandomGame(null);
@@ -97,6 +92,7 @@ export default function GameDetails() {
         {({
           isLoading,
           game,
+          downloadGame,
           gameTitle,
           shop,
           showRepacksModal,
@@ -122,12 +118,13 @@ export default function GameDetails() {
           ) => {
             const selectedUri = selectRepackUri(repack, downloader);
             const buildPayload = (uri: string, uriDownloader: Downloader) => ({
-              objectId: objectId!,
+              objectId: downloadGame?.objectId ?? game?.objectId ?? objectId!,
               title: gameTitle,
               downloader: uriDownloader,
-              shop,
+              shop: downloadGame?.shop ?? game?.shop ?? shop,
               downloadPath,
               uri,
+              parts: getRepackUriParts(repack, uri),
               automaticallyExtract,
               automaticallyDeleteArchiveFiles,
               fileSize: repack.fileSize,
@@ -185,8 +182,14 @@ export default function GameDetails() {
           };
 
           return (
-            <CloudSaveV2Provider objectId={objectId!} shop={shop}>
-              <CloudSyncContextProvider objectId={objectId!} shop={shop}>
+            <CloudSaveV2Provider
+              objectId={game?.objectId ?? objectId!}
+              shop={game?.shop ?? shop}
+            >
+              <CloudSyncContextProvider
+                objectId={game?.objectId ?? objectId!}
+                shop={game?.shop ?? shop}
+              >
                 <CloudSyncContextConsumer>
                   {({
                     showCloudSyncFilesModal,

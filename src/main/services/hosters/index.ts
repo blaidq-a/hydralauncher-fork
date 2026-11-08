@@ -7,3 +7,4 @@ export * from "./vikingfile";
 export * from "./rootz";
 export * from "./megadb";
 export * from "./buzzheavier";
+export * from "./filekeeper";

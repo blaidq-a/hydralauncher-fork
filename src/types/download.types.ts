@@ -22,8 +22,6 @@ export interface DownloadProgress {
   isReconnecting?: boolean;
   isRecovering?: boolean;
   recoveryProgress?: number;
-  isSegmented?: boolean;
-  isMerging?: boolean;
   progress: number;
   gameId: string;
   download: Download;
@@ -54,6 +52,7 @@ export interface TorBoxFile {
   size: number;
   mimetype: string;
   short_name: string;
+  zipped?: boolean;
 }
 
 export interface TorBoxTorrentInfo {

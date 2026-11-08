@@ -138,7 +138,10 @@ async function renderLibrary(
       useUserDetails: () => ({ userDetails }),
       useAppDispatch: () => noop,
       useAppSelector: (select: (state: unknown) => unknown) =>
-        select({ library: { searchQuery: "" } }),
+        select({
+          library: { searchQuery: "" },
+          gameRunning: { gameRunning: null },
+        }),
       useGameCollections: () => ({
         collections,
         loadCollections,
@@ -148,6 +151,7 @@ async function renderLibrary(
     },
     "@renderer/features": {
       selectIsLibraryLoading: () => false,
+      selectGroupedLibrary: () => library,
       setHeaderTitle: noop,
     },
     "@primer/octicons-react": Object.fromEntries(
@@ -162,6 +166,7 @@ async function renderLibrary(
     "react-i18next": { useTranslation: () => ({ t: translate }) },
     "@shared": {
       AuthPage: { SignIn: "sign-in" },
+      groupLibraryGames: (games: TestGame[]) => games,
       removeDiacritics: (value: string) => value,
     },
     "@renderer/components": {
@@ -193,7 +198,10 @@ async function renderLibrary(
       categoryShowsPlatforms: () => false,
       categoryShowsSources: () => false,
       filterLibraryGames: (games: TestGame[]) => games,
-      getLibraryFilterOptions: () => ({ platforms: [], hasSteamGames: false }),
+      getLibraryFilterOptions: () => ({
+        platforms: [],
+        hasImportedGames: false,
+      }),
       readStoredLibraryFilters: () => ({ category: "all", sources: [] }),
     },
     "@renderer/session-state": {

@@ -13,8 +13,12 @@ export enum Downloader {
   Premiumize = 12,
   AllDebrid = 13,
   ArchiveOrg = 14,
-  MegaDB = 15,
-  Buzzheavier = 16,
+  Epic = 15,
+  FileKeeper = 16,
+  // Fork-only hosters use a separate range so upstream additions never
+  // reuse their ids (stored downloads keep pointing at the right hoster).
+  MegaDB = 100,
+  Buzzheavier = 101,
 }
 
 export enum DownloadSourceStatus {
@@ -22,6 +26,7 @@ export enum DownloadSourceStatus {
   Matched = "MATCHED",
   Matching = "MATCHING",
   Failed = "FAILED",
+  Dead = "DEAD",
 }
 
 export enum CatalogueCategory {
@@ -65,6 +70,8 @@ export enum AuthPage {
 
 export enum DownloadError {
   NotCachedOnRealDebrid = "download_error_not_cached_on_real_debrid",
+  RealDebridTorrentNotReady = "download_error_real_debrid_torrent_not_ready",
+  RealDebridLinksNotReady = "download_error_real_debrid_links_not_ready",
   NotCachedOnTorBox = "download_error_not_cached_on_torbox",
   GofileQuotaExceeded = "download_error_gofile_quota_exceeded",
   RealDebridAccountNotAuthorized = "download_error_real_debrid_account_not_authorized",
@@ -156,3 +163,8 @@ export const CLOUD_GIFT_ID_VARIABLE = "giftId";
 export const NOTIFICATIONS_FETCH_FILTER = "all";
 export const NOTIFICATIONS_FETCH_TAKE = 20;
 export const NOTIFICATIONS_FETCH_SKIP = 0;
+
+// The API reports a friend's current game for Steam and Epic only unless asked,
+// so a friend in a Classics (LaunchBox) game would show as merely online.
+export const PROFILE_FRIENDS_PATH =
+  "/profile/friends?shop=steam&shop=launchbox";
