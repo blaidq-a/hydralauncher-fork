@@ -57,6 +57,14 @@ const RATE_LIMIT_RETRY_MAX_MS = 5000;
  */
 const CONNECTION_REGROW_QUIET_MS = 15_000;
 const CONNECTION_REGROW_CHECK_MS = 5_000;
+/**
+ * Fork: after a 429 the connection count that triggered it becomes a ceiling,
+ * so the download does not keep hitting the host's limit (seen on Gofile:
+ * 15 -> 12 -> 15 -> 12 every ~30 s). The ceiling is raised one step only
+ * after a long quiet period. 429s arriving together count as one event.
+ */
+const CONNECTION_CEILING_PROBE_QUIET_MS = 60_000;
+const RATE_LIMIT_BURST_WINDOW_MS = 2_000;
 
 const waitFor = (ms: number, signal: AbortSignal) =>
   new Promise<void>((resolve, reject) => {
@@ -341,6 +349,8 @@ export async function downloadParallelRanges({
   // initial ramp-up has had time to settle.
   let lastRateLimitAt = Date.now();
   let pendingStarts = 0;
+  let connectionCeiling = Number.POSITIVE_INFINITY;
+  let lastCeilingDropAt = 0;
   const rateLimitedRanges = new Set<number>();
   // Numbers ranges in log messages.
   let rangeCounter = 0;
@@ -445,9 +455,16 @@ export async function downloadParallelRanges({
         return;
       }
 
+      const connectionsAtLimit = activeConnections;
       activeConnections -= 1;
+      // One limit hit lowers the ceiling by one; the rest of a burst of
+      // simultaneous refusals is refilled by the regrow timer.
+      if (Date.now() - lastCeilingDropAt > RATE_LIMIT_BURST_WINDOW_MS) {
+        connectionCeiling = Math.max(1, connectionsAtLimit - 1);
+        lastCeilingDropAt = Date.now();
+      }
       logger.log(
-        `[JsHttpDownloader] Server limited parallel connections (HTTP ${response.status}); continuing with ${activeConnections}`
+        `[JsHttpDownloader] Server limited parallel connections (HTTP ${response.status}); continuing with ${activeConnections}, limit ${connectionCeiling}`
       );
       throw new RetireConnectionSignal();
     }
@@ -615,18 +632,25 @@ export async function downloadParallelRanges({
   };
   const targetConnections = Math.min(connectionCount, jobs.length);
   const regrowTimer = setInterval(() => {
+    const quietFor = Date.now() - lastRateLimitAt;
     if (
       hasWorkerError ||
       signal.aborted ||
       activeConnections + pendingStarts >= targetConnections ||
       nextJob >= jobs.length ||
-      Date.now() - lastRateLimitAt < CONNECTION_REGROW_QUIET_MS
+      quietFor < CONNECTION_REGROW_QUIET_MS
     ) {
       return;
     }
+    if (activeConnections + pendingStarts >= connectionCeiling) {
+      // Probe one connection above the learned limit after a long quiet.
+      if (quietFor < CONNECTION_CEILING_PROBE_QUIET_MS) return;
+      connectionCeiling += 1;
+      lastRateLimitAt = Date.now();
+    }
     track(worker());
     logger.log(
-      `[JsHttpDownloader] No rate limit for ${CONNECTION_REGROW_QUIET_MS / 1000}s; adding a connection back (${activeConnections}/${targetConnections})`
+      `[JsHttpDownloader] Adding a connection back (${activeConnections}/${Math.min(targetConnections, connectionCeiling)})`
     );
   }, CONNECTION_REGROW_CHECK_MS);
   try {
