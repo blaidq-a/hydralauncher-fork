@@ -1,6 +1,7 @@
 import { withDownloadActivation } from "./download-activation";
 import { setDownloadLogger } from "./download-logger";
 import { ThreadedJsHttpDownloader } from "./threaded-js-http-downloader";
+import { Aria2Downloader } from "./aria2-downloader";
 import {
   configureRangeStateDirectory,
   getRangeDownloadedBytes,
@@ -247,6 +248,7 @@ export class DownloadManager {
   private static jsDownloader:
     | JsHttpDownloader
     | ThreadedJsHttpDownloader
+    | Aria2Downloader
     | TorBoxBatchDownloader
     | null = null;
   private static usingJsDownloader = false;
@@ -3565,6 +3567,36 @@ export class DownloadManager {
       logger.log(
         "[DownloadManager] Download was superseded during preparation; aborting start"
       );
+      return;
+    }
+
+    // Fork: hoster files go through aria2, which keeps each connection
+    // independent (Gofile refuses some requests with 429 and the JS engine
+    // kept losing speed). Buzzheavier stays on the JS engine: it caps each
+    // connection at ~3.5 MB/s and needs 32 connections, aria2 allows 16.
+    const aria2 =
+      DIRECT_HOSTER_DOWNLOADERS.has(download.downloader) &&
+      download.downloader !== Downloader.Buzzheavier
+        ? Aria2Downloader.tryCreate()
+        : null;
+    if (aria2) {
+      this.jsDownloader = aria2;
+      aria2.setMaxDownloadSpeedBytesPerSecond(
+        this.maxDownloadSpeedBytesPerSecond
+      );
+      this.isPreparingDownload = false;
+      this.logResolvedUrl(options.url);
+      aria2
+        .startDownload({
+          url: options.url,
+          savePath: options.savePath,
+          filename: options.filename,
+          headers: options.headers,
+          connections: getHosterParallelConnections(download.downloader),
+        })
+        .catch((err) =>
+          this.reportRuntimeDownloadError(downloadId, err, myGeneration)
+        );
       return;
     }
 

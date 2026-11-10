@@ -63,6 +63,8 @@ win:
         - NOTICE.md
     - from: binaries/7z.exe
     - from: binaries/7z.dll
+    # Fork: aria2 for hoster downloads (from upstream Hydra history, 1.37.0)
+    - from: binaries/aria2c.exe
     - from: build/icon.ico
       to: icon.ico
   target:
