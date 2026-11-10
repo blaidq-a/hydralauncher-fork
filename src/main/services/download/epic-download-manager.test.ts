@@ -187,6 +187,7 @@ function fixture() {
     "./threaded-js-http-downloader": {
       ThreadedJsHttpDownloader: { tryCreate: () => null },
     },
+    "./aria2-downloader": { Aria2Downloader: { tryCreate: () => null } },
     // Fork-only hoster helpers used by MegaDB/Buzzheavier downloads.
     "../hosters/buzzheavier": { isBuzzheavierPageLink: () => false },
     "../hosters/steamrip-referer": {
