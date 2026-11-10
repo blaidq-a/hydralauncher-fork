@@ -206,7 +206,10 @@ export class Aria2Downloader {
       "--continue=false",
       "--allow-overwrite=true",
       "--auto-file-renaming=false",
-      "--file-allocation=none",
+      // "none" made Windows zero-fill the file up to each far-off write while
+      // aria2 waited, so only one connection made progress for the first
+      // 10-15 s of a large download. "trunc" sets the size up front.
+      "--file-allocation=trunc",
       "--disk-cache=64M",
       "--auto-save-interval=5",
       `--max-connection-per-server=${connections}`,

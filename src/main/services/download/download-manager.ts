@@ -3570,15 +3570,10 @@ export class DownloadManager {
       return;
     }
 
-    // Fork: hoster files go through aria2, which keeps each connection
-    // independent (Gofile refuses some requests with 429 and the JS engine
-    // kept losing speed). Buzzheavier stays on the JS engine: it caps each
-    // connection at ~3.5 MB/s and needs 32 connections, aria2 allows 16.
-    const aria2 =
-      DIRECT_HOSTER_DOWNLOADERS.has(download.downloader) &&
-      download.downloader !== Downloader.Buzzheavier
-        ? Aria2Downloader.tryCreate()
-        : null;
+    // Fork: single-file HTTP downloads go through aria2 (steadier on Gofile,
+    // which refuses some requests with 429, and as fast as the JS engine on
+    // Buzzheavier in live tests). Multi-file batches keep the JS engine.
+    const aria2 = Aria2Downloader.tryCreate();
     if (aria2) {
       this.jsDownloader = aria2;
       aria2.setMaxDownloadSpeedBytesPerSecond(
@@ -3592,7 +3587,11 @@ export class DownloadManager {
           savePath: options.savePath,
           filename: options.filename,
           headers: options.headers,
-          connections: getHosterParallelConnections(download.downloader),
+          connections:
+            options.allowParallelRanges === false
+              ? 1
+              : (options.parallelRangeConnections ??
+                getHosterParallelConnections(download.downloader)),
         })
         .catch((err) =>
           this.reportRuntimeDownloadError(downloadId, err, myGeneration)
