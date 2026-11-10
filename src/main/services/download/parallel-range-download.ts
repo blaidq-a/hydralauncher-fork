@@ -50,6 +50,13 @@ class RetireConnectionSignal extends Error {}
 const CONNECTION_START_INTERVAL_MS = 250;
 const RATE_LIMIT_RETRY_MIN_MS = 1000;
 const RATE_LIMIT_RETRY_MAX_MS = 5000;
+/**
+ * Fork: hosts like Gofile return an occasional 429 when a connection asks
+ * for its next range; without this the connection count only went down over
+ * a long download. After a quiet period a dropped connection is added back.
+ */
+const CONNECTION_REGROW_QUIET_MS = 30_000;
+const CONNECTION_REGROW_CHECK_MS = 10_000;
 
 const waitFor = (ms: number, signal: AbortSignal) =>
   new Promise<void>((resolve, reject) => {
@@ -330,6 +337,10 @@ export async function downloadParallelRanges({
   let nextJob = 0;
   let firstUsed = false;
   let activeConnections = 0;
+  // Starts "quiet" now, so connections are only added back after the
+  // initial ramp-up has had time to settle.
+  let lastRateLimitAt = Date.now();
+  let pendingStarts = 0;
   const rateLimitedRanges = new Set<number>();
   // Numbers ranges in log messages.
   let rangeCounter = 0;
@@ -415,6 +426,7 @@ export async function downloadParallelRanges({
       await response.body?.cancel().catch(() => undefined);
       stopStallTimer();
       jobs.splice(nextJob, 0, range);
+      lastRateLimitAt = Date.now();
 
       // A single 429 is often momentary (a just-finished connection still
       // counted by the server): wait and try again before giving up a
@@ -575,26 +587,60 @@ export async function downloadParallelRanges({
   };
   const startWorker = async (index: number) => {
     if (index > 0) {
-      await waitFor(index * CONNECTION_START_INTERVAL_MS, signal);
+      pendingStarts += 1;
+      try {
+        await waitFor(index * CONNECTION_START_INTERVAL_MS, signal);
+      } finally {
+        pendingStarts -= 1;
+      }
     }
     return worker();
   };
-  let workers: Promise<void>[] = [];
+  // Workers can be added while the download runs (see regrow below), so
+  // track them in a set and wait until all of them settle.
+  const runningWorkers = new Set<Promise<void>>();
+  let workerError: unknown = null;
+  let hasWorkerError = false;
+  const track = (run: Promise<void>) => {
+    const tracked: Promise<void> = run
+      .catch((error: unknown) => {
+        if (!hasWorkerError) {
+          hasWorkerError = true;
+          workerError = error;
+          abort();
+        }
+      })
+      .finally(() => runningWorkers.delete(tracked));
+    runningWorkers.add(tracked);
+  };
+  const targetConnections = Math.min(connectionCount, jobs.length);
+  const regrowTimer = setInterval(() => {
+    if (
+      hasWorkerError ||
+      signal.aborted ||
+      activeConnections + pendingStarts >= targetConnections ||
+      nextJob >= jobs.length ||
+      Date.now() - lastRateLimitAt < CONNECTION_REGROW_QUIET_MS
+    ) {
+      return;
+    }
+    track(worker());
+    logger.log(
+      `[JsHttpDownloader] No rate limit for ${CONNECTION_REGROW_QUIET_MS / 1000}s; adding a connection back (${activeConnections}/${targetConnections})`
+    );
+  }, CONNECTION_REGROW_CHECK_MS);
   try {
     await persist();
-    workers = Array.from(
-      { length: Math.min(connectionCount, jobs.length) },
-      (_, index) => startWorker(index)
-    );
-    try {
-      await Promise.all(workers);
-    } catch (error) {
-      abort();
-      await Promise.allSettled(workers);
-      throw error;
+    for (let index = 0; index < targetConnections; index++) {
+      track(startWorker(index));
     }
+    while (runningWorkers.size > 0) {
+      await Promise.race(runningWorkers);
+    }
+    if (hasWorkerError) throw workerError;
     return missingRanges(state).length === 0;
   } finally {
+    clearInterval(regrowTimer);
     try {
       await persist();
     } finally {
