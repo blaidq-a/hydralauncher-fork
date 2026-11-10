@@ -182,6 +182,11 @@ function fixture() {
         },
       },
     },
+    // Fork: logger bridge and worker-thread downloader.
+    "./download-logger": { setDownloadLogger: () => {} },
+    "./threaded-js-http-downloader": {
+      ThreadedJsHttpDownloader: { tryCreate: () => null },
+    },
     // Fork-only hoster helpers used by MegaDB/Buzzheavier downloads.
     "../hosters/buzzheavier": { isBuzzheavierPageLink: () => false },
     "../hosters/steamrip-referer": {

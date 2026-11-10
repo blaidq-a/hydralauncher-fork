@@ -16,6 +16,11 @@ export interface RangeDownloadState {
 const MAX_RANGE_STATE_SIZE_BYTES = 1024 * 1024;
 let rangeStateDirectory: string | undefined;
 
+/** Fork: lets the download worker thread use the same metadata folder. */
+export function getRangeStateDirectory(): string | undefined {
+  return rangeStateDirectory;
+}
+
 export function configureRangeStateDirectory(directory: string): void {
   rangeStateDirectory = path.resolve(directory);
 }

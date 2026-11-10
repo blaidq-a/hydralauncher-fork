@@ -13,6 +13,8 @@ const STARTUP_DELAY_MS = 60 * 1000;
 const ARCHIVE_REMOVED_DELAY_MS = 10 * 1000;
 /** A folder appeared without an archive (e.g. a copy): give it time to land. */
 const NEW_FOLDER_DELAY_MS = 3 * 60 * 1000;
+/** Scanning walks every file in the folder; never compete with a download. */
+const DOWNLOAD_ACTIVE_RETRY_MS = 2 * 60 * 1000;
 
 let watcher: fs.FSWatcher | null = null;
 let watchedPath: string | null = null;
@@ -37,6 +39,10 @@ const handleDownloadsFolderChange = (
   downloadsPath: string,
   fileName: string | null
 ) => {
+  logger.info(
+    `[AutoLibraryScan] Change in downloads folder: ${fileName ?? "(unknown entry)"}`
+  );
+
   if (!fileName) {
     scheduleScan(NEW_FOLDER_DELAY_MS);
     return;
@@ -88,7 +94,23 @@ const ensureWatcher = async () => {
   }
 };
 
+const isDownloadActive = async () => {
+  try {
+    const { DownloadManager } = await import("./download/download-manager");
+    return DownloadManager.hasActiveDownload();
+  } catch {
+    return false;
+  }
+};
+
 const runScan = async () => {
+  if (await isDownloadActive()) {
+    // The scan reads every file in the downloads folder; postpone it so it
+    // does not slow down or stutter an ongoing download.
+    scheduleScan(DOWNLOAD_ACTIVE_RETRY_MS);
+    return;
+  }
+
   try {
     const { runAutomaticLibraryScan } = await import(
       "@main/events/library/scan-installed-games"

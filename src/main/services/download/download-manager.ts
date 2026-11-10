@@ -1,4 +1,6 @@
 import { withDownloadActivation } from "./download-activation";
+import { setDownloadLogger } from "./download-logger";
+import { ThreadedJsHttpDownloader } from "./threaded-js-http-downloader";
 import {
   configureRangeStateDirectory,
   getRangeDownloadedBytes,
@@ -113,6 +115,8 @@ import {
 configureRangeStateDirectory(
   path.join(SystemPath.getPath("userData"), "DownloadRanges")
 );
+// The HTTP downloader logs through a bridge so it can also run in a worker.
+setDownloadLogger(logger);
 
 const PREFLIGHT_MAX_ATTEMPTS = 3;
 const PREFLIGHT_RETRY_DELAY_MS = 1000;
@@ -147,6 +151,17 @@ const DIRECT_HOSTER_DOWNLOADERS = new Set<Downloader>([
   Downloader.MegaDB,
   Downloader.Buzzheavier,
 ]);
+
+// Fork: 8 MB ranges make every connection stop for a new request roughly
+// once a second, which shows up as speed swinging between ~60% and 100%.
+// Longer ranges keep each connection streaming (verified with a local
+// CDN-like benchmark: 83 -> 107 MB/s, variation 21% -> 3%).
+const HOSTER_PARALLEL_RANGE_SIZE = 64 * 1024 * 1024;
+
+const getHosterParallelRangeSize = (downloader: Downloader) =>
+  DIRECT_HOSTER_DOWNLOADERS.has(downloader)
+    ? HOSTER_PARALLEL_RANGE_SIZE
+    : undefined;
 
 const getHosterParallelConnections = (downloader: Downloader) =>
   DIRECT_HOSTER_DOWNLOADERS.has(downloader)
@@ -217,8 +232,11 @@ function realDebridConnections(chunks: number | undefined): number {
 
 export class DownloadManager {
   private static downloadingGameId: string | null = null;
-  private static jsDownloader: JsHttpDownloader | TorBoxBatchDownloader | null =
-    null;
+  private static jsDownloader:
+    | JsHttpDownloader
+    | ThreadedJsHttpDownloader
+    | TorBoxBatchDownloader
+    | null = null;
   private static usingJsDownloader = false;
   private static usingEpicDownloader = false;
   private static readonly epicCompletions = new Set<string>();
@@ -3538,7 +3556,10 @@ export class DownloadManager {
       return;
     }
 
-    this.jsDownloader = new JsHttpDownloader();
+    // Fork: single downloads run in a worker thread so fast transfers do not
+    // stall the main thread (and the window). Falls back to in-process.
+    this.jsDownloader =
+      ThreadedJsHttpDownloader.tryCreate() ?? new JsHttpDownloader();
     this.jsDownloader.setMaxDownloadSpeedBytesPerSecond(
       this.maxDownloadSpeedBytesPerSecond
     );
@@ -3551,6 +3572,7 @@ export class DownloadManager {
         parallelRangeConnections:
           options.parallelRangeConnections ??
           getHosterParallelConnections(download.downloader),
+        parallelRangeSize: getHosterParallelRangeSize(download.downloader),
         resourceId: download.uri,
       })
       .catch((err) =>

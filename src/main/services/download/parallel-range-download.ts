@@ -209,9 +209,18 @@ export async function downloadParallelRanges({
     ranges: startByte > 0 ? [[0, startByte]] : [],
   };
   const jobs: ByteRange[] = [];
+  // Fork: when every connection starts with an equally sized range they all
+  // finish (and pause for a new request) at the same moment, which shows up
+  // as a regular dip in speed. Staggering the first round of ranges keeps the
+  // request gaps spread out. Request-budgeted downloads keep equal ranges.
+  const staggerFirstRound = maxRanges === Infinity && connectionCount > 1;
+  const rangeSizeFor = (index: number) =>
+    staggerFirstRound && index > 0 && index < connectionCount
+      ? Math.max(1, Math.round((rangeSize * index) / connectionCount))
+      : rangeSize;
   for (const [start, end] of missingRanges(state)) {
     for (let offset = start; offset < end && jobs.length < maxRanges; ) {
-      const next = Math.min(offset + rangeSize, end);
+      const next = Math.min(offset + rangeSizeFor(jobs.length), end);
       jobs.push({ start: offset, end: next - 1 });
       offset = next;
     }

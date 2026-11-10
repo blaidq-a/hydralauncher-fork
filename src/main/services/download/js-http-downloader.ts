@@ -6,7 +6,7 @@ import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { logger } from "../logger";
+import { logger } from "./download-logger";
 import {
   applySkip,
   chooseDownloadOutputPath,
