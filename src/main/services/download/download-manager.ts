@@ -161,12 +161,13 @@ const DIRECT_HOSTER_DOWNLOADERS = new Set<Downloader>([
 const HOSTER_PARALLEL_RANGE_SIZE = 64 * 1024 * 1024;
 
 // Fork: Gofile answers frequent range requests with HTTP 429, and every
-// refused request showed as a sudden speed drop. 256 MB ranges need 4x fewer
-// requests (like FDM, which keeps each connection on one long segment).
+// refused request showed as a sudden speed drop. Like FDM, the first request
+// covers the whole file and each new connection takes over half of the
+// largest remaining range, so a download needs only a few dozen requests.
 const HOSTER_PARALLEL_RANGE_SIZE_BY_DOWNLOADER: Partial<
   Record<Downloader, number>
 > = {
-  [Downloader.Gofile]: 256 * 1024 * 1024,
+  [Downloader.Gofile]: 2 ** 40,
 };
 
 const getHosterParallelRangeSize = (downloader: Downloader) =>
