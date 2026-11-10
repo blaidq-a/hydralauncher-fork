@@ -160,9 +160,19 @@ const DIRECT_HOSTER_DOWNLOADERS = new Set<Downloader>([
 // CDN-like benchmark: 83 -> 107 MB/s, variation 21% -> 3%).
 const HOSTER_PARALLEL_RANGE_SIZE = 64 * 1024 * 1024;
 
+// Fork: Gofile answers frequent range requests with HTTP 429, and every
+// refused request showed as a sudden speed drop. 256 MB ranges need 4x fewer
+// requests (like FDM, which keeps each connection on one long segment).
+const HOSTER_PARALLEL_RANGE_SIZE_BY_DOWNLOADER: Partial<
+  Record<Downloader, number>
+> = {
+  [Downloader.Gofile]: 256 * 1024 * 1024,
+};
+
 const getHosterParallelRangeSize = (downloader: Downloader) =>
   DIRECT_HOSTER_DOWNLOADERS.has(downloader)
-    ? HOSTER_PARALLEL_RANGE_SIZE
+    ? (HOSTER_PARALLEL_RANGE_SIZE_BY_DOWNLOADER[downloader] ??
+      HOSTER_PARALLEL_RANGE_SIZE)
     : undefined;
 
 const getHosterParallelConnections = (downloader: Downloader) =>

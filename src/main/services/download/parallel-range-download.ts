@@ -51,6 +51,12 @@ const CONNECTION_START_INTERVAL_MS = 500;
 const RATE_LIMIT_RETRY_MIN_MS = 1000;
 const RATE_LIMIT_RETRY_MAX_MS = 5000;
 /**
+ * Fork: a refused request is retried on the same connection with a growing
+ * wait (1, 2, 4 s) before the connection is given up. Dropping it on the
+ * second 429 made the speed fall for the ~15 s it took to add it back.
+ */
+const RATE_LIMIT_RETRIES_PER_RANGE = 3;
+/**
  * Fork: hosts like Gofile return an occasional 429 when a connection asks
  * for its next range; without this the connection count only went down over
  * a long download. After a quiet period a dropped connection is added back.
@@ -306,6 +312,18 @@ export async function downloadParallelRanges({
   // as a regular dip in speed. Staggering the first round of ranges keeps the
   // request gaps spread out. Request-budgeted downloads keep equal ranges.
   const staggerFirstRound = maxRanges === Infinity && connectionCount > 1;
+  // Fork: large hoster ranges are shrunk for small files so every
+  // connection still gets a range.
+  if (maxRanges === Infinity) {
+    const remaining = missingRanges(state).reduce(
+      (sum, [start, end]) => sum + end - start,
+      0
+    );
+    rangeSize = Math.min(
+      rangeSize,
+      Math.max(PARALLEL_RANGE_SIZE, Math.ceil(remaining / connectionCount))
+    );
+  }
   const rangeSizeFor = (index: number) =>
     staggerFirstRound && index > 0 && index < connectionCount
       ? Math.max(1, Math.round((rangeSize * index) / connectionCount))
@@ -351,7 +369,7 @@ export async function downloadParallelRanges({
   let pendingStarts = 0;
   let connectionCeiling = Number.POSITIVE_INFINITY;
   let lastCeilingDropAt = 0;
-  const rateLimitedRanges = new Set<number>();
+  const rateLimitedRanges = new Map<number, number>();
   // Numbers ranges in log messages.
   let rangeCounter = 0;
   const stallRetries = new Map<number, number>();
@@ -441,13 +459,14 @@ export async function downloadParallelRanges({
       // A single 429 is often momentary (a just-finished connection still
       // counted by the server): wait and try again before giving up a
       // connection for good.
-      if (!rateLimitedRanges.has(range.start)) {
-        rateLimitedRanges.add(range.start);
+      const rateLimitAttempts = rateLimitedRanges.get(range.start) ?? 0;
+      if (rateLimitAttempts < RATE_LIMIT_RETRIES_PER_RANGE) {
+        rateLimitedRanges.set(range.start, rateLimitAttempts + 1);
         const retryAfterSeconds = Number(response.headers.get("retry-after"));
         const waitMs = Math.min(
           RATE_LIMIT_RETRY_MAX_MS,
           Math.max(
-            RATE_LIMIT_RETRY_MIN_MS,
+            RATE_LIMIT_RETRY_MIN_MS * 2 ** rateLimitAttempts,
             Number.isFinite(retryAfterSeconds) ? retryAfterSeconds * 1000 : 0
           )
         );

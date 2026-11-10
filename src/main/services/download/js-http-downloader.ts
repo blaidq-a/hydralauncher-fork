@@ -772,7 +772,10 @@ export class JsHttpDownloader {
         total !== null &&
         validator !== null &&
         (startByte === 0 || this.resourceValidator === validator) &&
-        (this.savedRangeState || total - startByte >= rangeSize * 2) &&
+        // Fork: capped so large hoster ranges (Gofile 256 MB) still use
+        // parallel connections for smaller files.
+        (this.savedRangeState ||
+          total - startByte >= Math.min(rangeSize, PARALLEL_RANGE_SIZE) * 2) &&
         !/^(text\/html|application\/xhtml)/i.test(
           response.headers.get("content-type") ?? ""
         )
