@@ -1358,7 +1358,11 @@ declare global {
       cb: (event: AppUpdaterEvent) => void
     ) => () => Electron.IpcRenderer;
     checkForUpdates: () => Promise<boolean>;
+    getUpdateStatus: () => Promise<AppUpdateStatus>;
     restartAndInstallUpdate: () => Promise<void>;
+    onUpdateAvailable: (
+      cb: (status: AppUpdateStatus) => void
+    ) => () => Electron.IpcRenderer;
 
     /* Auth */
     getAuth: () => Promise<Auth | null>;

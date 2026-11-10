@@ -10,6 +10,7 @@ import type {
   UserPreferences,
   ScreenshotInputStatus,
   AppUpdaterEvent,
+  AppUpdateStatus,
   StartGameDownloadPayload,
   GameRunning,
   UpdateProfileRequest,
@@ -1497,19 +1498,13 @@ contextBridge.exposeInMainWorld("electron", {
 
   /* Updates */
   checkForUpdates: () => ipcRenderer.invoke("checkForUpdates"),
-  restartAndInstallUpdate: (downloadUrl: string) =>
-    ipcRenderer.invoke("restartAndInstallUpdate", downloadUrl),
-  onUpdateAvailable: (
-    cb: (update: {
-      version: string;
-      downloadUrl: string;
-      releaseUrl: string;
-    }) => void
-  ) => {
+  getUpdateStatus: () => ipcRenderer.invoke("getUpdateStatus"),
+  restartAndInstallUpdate: () => ipcRenderer.invoke("restartAndInstallUpdate"),
+  onUpdateAvailable: (cb: (status: AppUpdateStatus) => void) => {
     const listener = (
       _event: Electron.IpcRendererEvent,
-      update: { version: string; downloadUrl: string; releaseUrl: string }
-    ) => cb(update);
+      status: AppUpdateStatus
+    ) => cb(status);
     ipcRenderer.on("update-available", listener);
     return () => ipcRenderer.removeListener("update-available", listener);
   },

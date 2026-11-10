@@ -12,7 +12,7 @@ import { logger } from "../logger";
 import { WindowManager } from "../window-manager";
 import type { Game, UserPreferences, UserProfile } from "@types";
 import { db, levelKeys, themesSublevel } from "@main/level";
-import { restartAndInstallUpdate } from "@main/events/autoupdater/restart-and-install-update";
+import { UpdateManager } from "../update-manager";
 import { SystemPath } from "../system-path";
 import { getThemeSoundPath } from "@main/helpers";
 import { LocalNotificationManager } from "./local-notifications";
@@ -186,8 +186,7 @@ export const publishDownloadHaltedNotification = async (game: Game) => {
 };
 
 export const publishNotificationUpdateReadyToInstall = async (
-  version: string,
-  downloadUrl: string
+  version: string
 ) => {
   const title = t("new_update_available", {
     ns: "notifications",
@@ -203,7 +202,7 @@ export const publishNotificationUpdateReadyToInstall = async (
     icon: trayIcon,
   })
     .on("click", () => {
-      restartAndInstallUpdate(downloadUrl);
+      void UpdateManager.downloadAndInstallUpdate();
     })
     .show();
 

@@ -33,6 +33,11 @@ export function BottomPanel() {
   const extraction = useAppSelector((state) => state.download.extraction);
 
   const [version, setVersion] = useState("");
+  // Fork: newer original Hydra release than the one this fork is based on.
+  const [upstreamUpdate, setUpstreamUpdate] = useState<{
+    version: string;
+    releaseUrl: string;
+  } | null>(null);
   const [sessionHash, setSessionHash] = useState<null | string>("");
   const [commonRedistStatus, setCommonRedistStatus] = useState<string | null>(
     null
@@ -40,6 +45,20 @@ export function BottomPanel() {
 
   useEffect(() => {
     window.electron.getVersion().then((result) => setVersion(result));
+  }, []);
+
+  useEffect(() => {
+    const unsubscribe = window.electron.onUpdateAvailable((updateStatus) =>
+      setUpstreamUpdate(updateStatus.upstream)
+    );
+    window.electron
+      .getUpdateStatus()
+      .then((updateStatus) => setUpstreamUpdate(updateStatus.upstream))
+      .catch(() => undefined);
+
+    return () => {
+      unsubscribe();
+    };
   }, []);
 
   useEffect(() => {
@@ -203,6 +222,22 @@ export function BottomPanel() {
       </div>
 
       <div className="bottom-panel__right">
+        {upstreamUpdate && (
+          <button
+            type="button"
+            className="bottom-panel__upstream-update"
+            title={t("upstream_version_available_tooltip")}
+            onClick={() =>
+              window.electron.openExternal(upstreamUpdate.releaseUrl)
+            }
+          >
+            <small>
+              {t("upstream_version_available", {
+                version: upstreamUpdate.version,
+              })}
+            </small>
+          </button>
+        )}
         <button
           data-open-workwonders-changelog-mini
           className="bottom-panel__version-button"

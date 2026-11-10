@@ -1,40 +1,113 @@
-import axios from "axios";
-import { app } from "electron";
-import { logger } from "./logger";
+import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { pipeline } from "node:stream/promises";
+import type { Readable } from "node:stream";
 
-const GITHUB_OWNER = "blaidq-a";
-const GITHUB_REPO = "hydralauncher-fork";
-const GITHUB_API_URL = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}`;
+import axios from "axios";
+import { app, shell } from "electron";
+
+import type { AppUpdateStatus } from "@types";
+import { logger } from "./logger";
+import { compareVersions } from "./update-version";
+
+/** Repository the fork's own releases (and one-click updates) come from. */
+const FORK_REPOSITORY = "blaidq-a/hydralauncher-fork";
+/** Original Hydra repository, only used to tell users a new release exists. */
+const UPSTREAM_REPOSITORY = "hydralauncher/hydra";
+/**
+ * Upstream Hydra version this fork is currently merged with. Update it after
+ * every upstream merge; the fork's own version (package.json) is independent
+ * so fork-only releases can be published between upstream versions.
+ */
+export const UPSTREAM_BASE_VERSION = "4.4.0";
+
+const CHECK_INTERVAL_MS = 60 * 60 * 1000;
+const MIN_CHECK_GAP_MS = 60 * 1000;
+const REQUEST_TIMEOUT_MS = 15_000;
+const DOWNLOAD_TIMEOUT_MS = 30 * 60 * 1000;
+
+/** Hosts GitHub serves release assets from (including redirects). */
+const TRUSTED_DOWNLOAD_HOSTS = [
+  "github.com",
+  "objects.githubusercontent.com",
+  "release-assets.githubusercontent.com",
+];
 
 interface GitHubRelease {
   tag_name: string;
-  name: string;
   html_url: string;
-  assets: Array<{
+  draft: boolean;
+  prerelease: boolean;
+  assets: {
     name: string;
     browser_download_url: string;
-  }>;
+    /** "sha256:<hex>", provided by GitHub for release assets. */
+    digest?: string | null;
+  }[];
 }
+
+const isTrustedDownloadUrl = (url: string) => {
+  try {
+    const parsed = new URL(url);
+    return (
+      parsed.protocol === "https:" &&
+      TRUSTED_DOWNLOAD_HOSTS.includes(parsed.hostname.toLowerCase())
+    );
+  } catch {
+    return false;
+  }
+};
+
+/** Keeps a release tag usable as part of a file name. */
+const toSafeFileVersion = (version: string) =>
+  version.replaceAll(/[^0-9A-Za-z.-]/g, "_").slice(0, 40) || "update";
+
+const parseSha256Digest = (digest: string | null | undefined) => {
+  const match = /^sha256:([0-9a-f]{64})$/i.exec(digest ?? "");
+  return match ? match[1].toLowerCase() : null;
+};
+
+const sha256OfFile = async (filePath: string) => {
+  const hash = createHash("sha256");
+  await pipeline(fs.createReadStream(filePath), hash);
+  return hash.digest("hex");
+};
+
+const fetchLatestRelease = async (repository: string) => {
+  const response = await axios.get<GitHubRelease>(
+    `https://api.github.com/repos/${repository}/releases/latest`,
+    {
+      timeout: REQUEST_TIMEOUT_MS,
+      headers: { Accept: "application/vnd.github+json" },
+    }
+  );
+
+  return response.data;
+};
 
 export class UpdateManager {
   private static checkInterval: NodeJS.Timeout | null = null;
   private static lastCheckTime = 0;
-  private static readonly CHECK_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+  private static status: AppUpdateStatus = { fork: null, upstream: null };
+  /** Kept in the main process only; the renderer can never choose it. */
+  private static installerUrl: string | null = null;
+  private static installerSha256: string | null = null;
+  private static isInstalling = false;
 
   public static async initialize(): Promise<void> {
-    // Check for updates on startup
     await this.checkForUpdates();
-
-    // Check periodically
     this.startPeriodicCheck();
   }
 
-  private static startPeriodicCheck() {
+  public static startPeriodicCheck() {
     if (this.checkInterval) return;
 
-    this.checkInterval = setInterval(async () => {
-      await this.checkForUpdates();
-    }, this.CHECK_INTERVAL_MS);
+    this.checkInterval = setInterval(() => {
+      void this.checkForUpdates();
+    }, CHECK_INTERVAL_MS);
   }
 
   public static stopPeriodicCheck() {
@@ -44,136 +117,177 @@ export class UpdateManager {
     }
   }
 
+  public static getStatus(): AppUpdateStatus {
+    return this.status;
+  }
+
+  /** Returns true when a newer fork build can be installed. */
   public static async checkForUpdates(): Promise<boolean> {
     const now = Date.now();
-    if (now - this.lastCheckTime < 60000) {
-      // Don't check more than once per minute
-      return false;
+    if (now - this.lastCheckTime < MIN_CHECK_GAP_MS) {
+      return this.status.fork !== null;
     }
     this.lastCheckTime = now;
 
+    const [fork, upstream] = await Promise.allSettled([
+      this.checkForkRelease(),
+      this.checkUpstreamRelease(),
+    ]);
+
+    if (fork.status === "rejected") {
+      logger.error(
+        "[UpdateManager] Failed to check fork releases",
+        fork.reason
+      );
+    }
+    if (upstream.status === "rejected") {
+      logger.warn(
+        "[UpdateManager] Failed to check upstream Hydra releases",
+        upstream.reason
+      );
+    }
+
+    this.status = {
+      fork: fork.status === "fulfilled" ? fork.value : this.status.fork,
+      upstream:
+        upstream.status === "fulfilled" ? upstream.value : this.status.upstream,
+    };
+
+    await this.notifyRenderer();
+    return this.status.fork !== null;
+  }
+
+  private static async checkForkRelease(): Promise<AppUpdateStatus["fork"]> {
+    const release = await fetchLatestRelease(FORK_REPOSITORY);
+    const latestVersion = release.tag_name.replace(/^v/i, "");
+    const currentVersion = app.getVersion();
+
+    logger.log(
+      `[UpdateManager] Fork latest: ${latestVersion}, current: ${currentVersion}`
+    );
+
+    if (release.draft || compareVersions(latestVersion, currentVersion) <= 0) {
+      this.installerUrl = null;
+      return null;
+    }
+
+    const installer = release.assets.find((asset) =>
+      asset.name.toLowerCase().endsWith("-setup.exe")
+    );
+    const canInstall =
+      process.platform === "win32" &&
+      !process.env.PORTABLE_EXECUTABLE_FILE &&
+      !!installer &&
+      isTrustedDownloadUrl(installer.browser_download_url);
+
+    this.installerUrl = canInstall ? installer!.browser_download_url : null;
+    this.installerSha256 = canInstall
+      ? parseSha256Digest(installer!.digest)
+      : null;
+
+    return {
+      version: latestVersion,
+      releaseUrl: release.html_url,
+      canInstall,
+    };
+  }
+
+  private static async checkUpstreamRelease(): Promise<
+    AppUpdateStatus["upstream"]
+  > {
+    const release = await fetchLatestRelease(UPSTREAM_REPOSITORY);
+    const latestVersion = release.tag_name.replace(/^v/i, "");
+
+    if (compareVersions(latestVersion, UPSTREAM_BASE_VERSION) <= 0) {
+      return null;
+    }
+
+    return { version: latestVersion, releaseUrl: release.html_url };
+  }
+
+  private static async notifyRenderer() {
     try {
-      logger.log("[UpdateManager] Checking for updates from GitHub...");
-
-      const response = await axios.get<GitHubRelease>(
-        `${GITHUB_API_URL}/releases/latest`,
-        { timeout: 10000 }
-      );
-
-      const release = response.data;
-      const latestVersion = release.tag_name.replace(/^v/, "");
-      const currentVersion = app.getVersion();
-
-      logger.log(
-        `[UpdateManager] Latest: ${latestVersion}, Current: ${currentVersion}`
-      );
-
-      if (this.compareVersions(latestVersion, currentVersion) > 0) {
-        logger.log(
-          `[UpdateManager] New version available: ${latestVersion}`
-        );
-
-        const exeAsset = release.assets.find((asset) =>
-          asset.name.includes("setup.exe")
-        );
-
-        if (exeAsset) {
-          // Notify renderer about available update
-          try {
-            const wmModule = await import("./window-manager");
-            wmModule.WindowManager.sendToAppWindows("update-available", {
-              version: latestVersion,
-              downloadUrl: exeAsset.browser_download_url,
-              releaseUrl: release.html_url,
-            });
-          } catch (error) {
-            logger.error(
-              "[UpdateManager] Failed to notify about update availability",
-              error
-            );
-          }
-
-          return true;
-        }
-      }
-
-      return false;
+      const { WindowManager } = await import("./window-manager");
+      WindowManager.sendToAppWindows("update-available", this.status);
     } catch (error) {
-      logger.error("[UpdateManager] Failed to check for updates", error);
-      return false;
+      logger.error("[UpdateManager] Failed to notify renderer", error);
     }
   }
 
-  public static async downloadAndInstallUpdate(downloadUrl: string) {
+  /**
+   * Downloads the fork installer found by the last check and runs it
+   * silently. The installer closes Hydra, updates it and starts it again.
+   */
+  public static async downloadAndInstallUpdate(): Promise<void> {
+    const fork = this.status.fork;
+
+    if (!fork) throw new Error("No update is available");
+
+    if (!fork.canInstall || !this.installerUrl) {
+      await shell.openExternal(fork.releaseUrl);
+      return;
+    }
+
+    if (this.isInstalling) return;
+    this.isInstalling = true;
+
     try {
-      logger.log(`[UpdateManager] Downloading update from ${downloadUrl}`);
-
-      const response = await axios.get<NodeJS.ReadableStream>(downloadUrl, {
-        responseType: "stream",
-        timeout: 300000, // 5 minutes
-      });
-
-      const os = await import("node:os");
-      const path = await import("node:path");
-      const { execSync } = await import("node:child_process");
-
-      const tempDir = os.tmpdir();
-      const installerPath = path.join(tempDir, "Hydra-update-setup.exe");
-
-      logger.log(`[UpdateManager] Saving installer to ${installerPath}`);
-
-      const writer = (await import("node:fs")).createWriteStream(
-        installerPath
+      // A fresh private folder, so nothing can be planted at a known path.
+      const downloadDirectory = await fs.promises.mkdtemp(
+        path.join(os.tmpdir(), "hydra-update-")
+      );
+      const installerPath = path.join(
+        downloadDirectory,
+        `Hydra-${toSafeFileVersion(fork.version)}-setup.exe`
       );
 
-      return new Promise<void>((resolve, reject) => {
-        response.data.pipe(writer);
+      logger.log(`[UpdateManager] Downloading fork update ${fork.version}`);
 
-        writer.on("finish", async () => {
-          try {
-            logger.log("[UpdateManager] Downloaded successfully, installing...");
-
-            // Launch the installer and quit the app
-            execSync(`"${installerPath}" /S`, { stdio: "ignore" });
-
-            // Give the installer time to start
-            await new Promise((r) => setTimeout(r, 1000));
-
-            app.quit();
-            resolve();
-          } catch (error) {
-            reject(error);
+      const response = await axios.get<Readable>(this.installerUrl, {
+        responseType: "stream",
+        timeout: DOWNLOAD_TIMEOUT_MS,
+        maxRedirects: 5,
+        beforeRedirect: (options) => {
+          const redirectUrl = `${options.protocol}//${options.hostname}${options.path ?? ""}`;
+          if (!isTrustedDownloadUrl(redirectUrl)) {
+            throw new Error("Update download redirected to an untrusted host");
           }
-        });
-
-        writer.on("error", (error) => {
-          logger.error("[UpdateManager] Error writing installer", error);
-          reject(error);
-        });
-
-        response.data.on("error", (error) => {
-          logger.error("[UpdateManager] Error downloading installer", error);
-          reject(error);
-        });
+        },
       });
+
+      await pipeline(response.data, fs.createWriteStream(installerPath));
+
+      if (this.installerSha256) {
+        const actual = await sha256OfFile(installerPath);
+        if (actual !== this.installerSha256) {
+          await fs.promises.rm(downloadDirectory, {
+            recursive: true,
+            force: true,
+          });
+          throw new Error(
+            "The downloaded update does not match the published checksum"
+          );
+        }
+      } else {
+        logger.warn(
+          "[UpdateManager] The release did not publish a checksum for the installer"
+        );
+      }
+
+      logger.log("[UpdateManager] Update downloaded, starting the installer");
+
+      // Detached so the installer outlives Hydra; --force-run restarts it.
+      const installer = spawn(installerPath, ["/S", "--force-run"], {
+        detached: true,
+        stdio: "ignore",
+      });
+      installer.unref();
+
+      setTimeout(() => app.quit(), 1000);
     } catch (error) {
+      this.isInstalling = false;
       logger.error("[UpdateManager] Failed to download/install update", error);
       throw error;
     }
-  }
-
-  private static compareVersions(v1: string, v2: string): number {
-    const parts1 = v1.split(".").map(Number);
-    const parts2 = v2.split(".").map(Number);
-
-    for (let i = 0; i < Math.max(parts1.length, parts2.length); i++) {
-      const part1 = parts1[i] || 0;
-      const part2 = parts2[i] || 0;
-
-      if (part1 > part2) return 1;
-      if (part1 < part2) return -1;
-    }
-
-    return 0;
   }
 }

@@ -81,6 +81,16 @@
     }
   }
 
+  &__upstream-update {
+    color: globals.$success-color;
+    border-bottom: solid 1px transparent;
+
+    &:hover {
+      border-bottom: solid 1px globals.$success-color;
+      cursor: pointer;
+    }
+  }
+
   &__version-button {
     color: globals.$body-color;
     border-bottom: solid 1px transparent;

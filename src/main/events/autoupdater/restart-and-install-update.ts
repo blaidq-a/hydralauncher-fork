@@ -1,16 +1,10 @@
 import { registerEvent } from "../register-event";
 import { UpdateManager } from "@main/services/update-manager";
 
-export const restartAndInstallUpdate = async (downloadUrl: string) => {
-  if (!downloadUrl) {
-    throw new Error("Download URL is required for update installation");
-  }
-  return UpdateManager.downloadAndInstallUpdate(downloadUrl);
-};
+// The installer URL is resolved by the main process from the fork's GitHub
+// release; the renderer can only ask to install what was found.
+export const restartAndInstallUpdate = async (
+  _event: Electron.IpcMainInvokeEvent
+) => UpdateManager.downloadAndInstallUpdate();
 
-const restartAndInstallUpdateEvent = async (
-  _event: Electron.IpcMainInvokeEvent,
-  downloadUrl: string
-) => restartAndInstallUpdate(downloadUrl);
-
-registerEvent("restartAndInstallUpdate", restartAndInstallUpdateEvent);
+registerEvent("restartAndInstallUpdate", restartAndInstallUpdate);

@@ -123,6 +123,7 @@
     "library": "Kütüphane",
     "version_available_install": "{{version}} sürümü mevcut. Yeniden başlatıp yüklemek için tıklayın.",
     "version_available_download": "{{version}} sürümü mevcut. İndirmek için tıklayın.",
+    "update_downloading": "{{version}} sürümü indiriliyor. Kurulunca Hydra yeniden başlayacak.",
     "recent_searches": "Recent Searches",
     "suggestions": "Suggestions",
     "clear_history": "Clear",
@@ -141,6 +142,8 @@
     "scan_games_scan_again": "Scan Again"
   },
   "bottom_panel": {
+    "upstream_version_available": "Hydra {{version}} çıktı",
+    "upstream_version_available_tooltip": "Orijinal Hydra'nın yeni bir sürümü çıktı. Bu fork onu ileriki bir güncellemede içerecek.",
     "no_downloads_in_progress": "Devam eden indirme yok",
     "downloading_metadata": "{{title}} meta verileri indiriliyor…",
     "downloading": "{{title}} indiriliyor… (%{{percentage}} tamamlandı) - Bitiş: {{eta}} - Hız: {{speed}}",

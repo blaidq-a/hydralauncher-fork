@@ -166,6 +166,7 @@
     "settings": "Settings",
     "version_available_install": "Version {{version}} available. Click here to restart and install.",
     "version_available_download": "Version {{version}} available. Click here to download.",
+    "update_downloading": "Downloading version {{version}}. Hydra will restart when it is installed.",
     "scan_games_tooltip": "Scan PC for installed games",
     "scan_games_title": "Scan PC for installed games",
     "scan_games_start": "Start Scan",
@@ -196,6 +197,8 @@
     "shop": "Shop"
   },
   "bottom_panel": {
+    "upstream_version_available": "Hydra {{version}} released",
+    "upstream_version_available_tooltip": "A newer original Hydra version is out. This fork will include it in a future update.",
     "reconnecting": "Reconnecting {{title}}…",
     "recovering": "Re-downloading the saved portion of {{title}}… ({{percentage}})",
     "no_downloads_in_progress": "No downloads in progress",

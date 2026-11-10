@@ -1172,3 +1172,19 @@ export type ExtractionFailure =
   | { reason: "unsupported-format"; format: string }
   | { reason: "file-not-found" };
 export type { SystemPowerAction } from "./system-power";
+
+/** Fork: update information shown in the header and the bottom panel. */
+export interface AppUpdateStatus {
+  /** A newer build of this fork that can be installed with one click. */
+  fork: {
+    version: string;
+    releaseUrl: string;
+    /** False for the portable build, which has to be downloaded manually. */
+    canInstall: boolean;
+  } | null;
+  /** A newer original Hydra release than the one this fork is based on. */
+  upstream: {
+    version: string;
+    releaseUrl: string;
+  } | null;
+}
