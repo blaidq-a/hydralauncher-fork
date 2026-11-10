@@ -325,7 +325,10 @@ export class MegaDBApi {
         webPreferences: {
           nodeIntegration: false,
           contextIsolation: true,
-          webSecurity: false,
+          // The page is an untrusted third-party (ad-heavy) site: keep the
+          // browser's same-origin rules on and run it in the OS sandbox.
+          webSecurity: true,
+          sandbox: true,
           backgroundThrottling: false,
           partition: "persist:megadb",
         },
