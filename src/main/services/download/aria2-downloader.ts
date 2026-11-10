@@ -178,6 +178,9 @@ export class Aria2Downloader {
 
   cancelDownload(deleteFile = true): void {
     const filePath = this.filePath;
+    // DownloadManager also "cancels" a finished download to release it; the
+    // finished file must stay (like JsHttpDownloader).
+    if (this.status?.status === "complete") deleteFile = false;
     this.status = null;
     const stopped = this.stopInBackground(!deleteFile);
     this.finish();
@@ -350,11 +353,17 @@ export class Aria2Downloader {
       folderName: filePath ? path.basename(filePath) : this.status.folderName,
       fileSize: total,
       bytesDownloaded: completed,
-      progress: total > 0 ? completed / total : 0,
+      progress: total > 0 ? Math.min(1, completed / total) : 0,
       downloadSpeed: Number(result.downloadSpeed),
     };
 
     if (result.status === "complete") {
+      // aria2 has written everything and removed its control file; stop it
+      // right away (a graceful stop took over 5 s) so the archive is closed
+      // before Hydra starts extracting it.
+      this.stopping = true;
+      this.stopPolling();
+      await this.kill();
       this.status = {
         ...this.status,
         status: "complete",
@@ -363,7 +372,6 @@ export class Aria2Downloader {
         downloadSpeed: 0,
       };
       logger.log("[Aria2] Download complete");
-      await this.shutdown();
       this.finish();
     } else if (result.status === "error" || result.status === "removed") {
       this.status = { ...this.status, status: "error", downloadSpeed: 0 };
@@ -390,6 +398,20 @@ export class Aria2Downloader {
   private stopPolling() {
     if (this.pollTimer) clearInterval(this.pollTimer);
     this.pollTimer = null;
+  }
+
+  private async kill() {
+    const child = this.process;
+    if (!child || child.exitCode !== null || child.signalCode !== null) {
+      this.process = null;
+      return;
+    }
+    const exited = new Promise<void>((resolve) =>
+      child.once("exit", () => resolve())
+    );
+    child.kill();
+    await exited;
+    if (this.process === child) this.process = null;
   }
 
   /** Stops aria2; it writes its control file so the download can resume. */
