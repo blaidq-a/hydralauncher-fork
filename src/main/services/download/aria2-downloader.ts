@@ -64,7 +64,25 @@ const getFreePort = () =>
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * Fork: hides aria2's control file (<file>.aria2), which has to sit next to
+ * the download. aria2 rewrites it on every save, which clears the attribute,
+ * so it is hidden again after each save and after aria2 stops.
+ */
+const hideControlFile = (controlFile: string) =>
+  new Promise<void>((resolve) => {
+    cp.execFile("attrib", ["+h", controlFile], { windowsHide: true }, () =>
+      resolve()
+    );
+  });
+
 export class Aria2Downloader {
+  /**
+   * Pausing returns at once while aria2 takes ~4 s to stop (measured); the
+   * next download waits for that so two aria2s never write the same file.
+   */
+  private static pendingShutdown: Promise<void> = Promise.resolve();
+
   private process: cp.ChildProcess | null = null;
   private port = 0;
   private secret = "";
@@ -76,6 +94,12 @@ export class Aria2Downloader {
   private activeRun: Promise<void> | null = null;
   private settle: ((error?: Error) => void) | null = null;
   private stopping = false;
+  private controlFileMtime = 0;
+
+  /** Resolves once a stopping aria2 has written its last control file. */
+  static waitForPendingShutdown(): Promise<void> {
+    return Aria2Downloader.pendingShutdown.catch(() => undefined);
+  }
 
   /** Returns null where aria2 is not available (non-Windows, missing exe). */
   static tryCreate(): Aria2Downloader | null {
@@ -148,17 +172,19 @@ export class Aria2Downloader {
       this.status = { ...this.status, status: "paused", downloadSpeed: 0 };
     }
     logger.log("[Aria2] Pausing download");
-    void this.shutdown().then(() => this.finish());
+    this.stopInBackground();
+    this.finish();
   }
 
   cancelDownload(deleteFile = true): void {
     const filePath = this.filePath;
     this.status = null;
-    void this.shutdown().then(() => {
-      this.finish();
-      if (!deleteFile || !filePath) return;
+    const stopped = this.stopInBackground(!deleteFile);
+    this.finish();
+    if (!deleteFile || !filePath) return;
+    Aria2Downloader.pendingShutdown = stopped.then(async () => {
       for (const target of [filePath, `${filePath}.aria2`]) {
-        fs.promises
+        await fs.promises
           .rm(target, { force: true })
           .catch((error: unknown) =>
             logger.error(`[Aria2] Could not delete ${target}`, error)
@@ -181,10 +207,23 @@ export class Aria2Downloader {
   }
 
   dispose(): void {
-    void this.shutdown().then(() => this.finish());
+    this.stopInBackground();
+    this.finish();
+  }
+
+  /** Stops aria2 without making the caller wait; hides the control file. */
+  private stopInBackground(hide = true): Promise<void> {
+    const stopped = this.shutdown().then(async () => {
+      if (hide && this.filePath) {
+        await hideControlFile(`${this.filePath}.aria2`);
+      }
+    });
+    Aria2Downloader.pendingShutdown = stopped;
+    return stopped;
   }
 
   private async launch(options: Aria2DownloadOptions) {
+    await Aria2Downloader.pendingShutdown;
     this.port = await getFreePort();
     this.secret = crypto.randomBytes(24).toString("hex");
     const connections = Math.min(
@@ -211,7 +250,9 @@ export class Aria2Downloader {
       // 10-15 s of a large download. "trunc" sets the size up front.
       "--file-allocation=trunc",
       "--disk-cache=64M",
-      "--auto-save-interval=5",
+      // Saved rarely and hidden again after each save; aria2 also saves it
+      // whenever it stops (pause, Hydra closing).
+      "--auto-save-interval=60",
       `--max-connection-per-server=${connections}`,
       `--split=${connections}`,
       "--min-split-size=16M",
@@ -299,7 +340,10 @@ export class Aria2Downloader {
     const total = Number(result.totalLength);
     const completed = Number(result.completedLength);
     const filePath = result.files?.[0]?.path;
-    if (filePath) this.filePath = path.normalize(filePath);
+    if (filePath) {
+      this.filePath = path.normalize(filePath);
+      void this.hideNewControlFile(`${this.filePath}.aria2`);
+    }
 
     this.status = {
       ...this.status,
@@ -329,6 +373,13 @@ export class Aria2Downloader {
       await this.shutdown();
       this.finish(error);
     }
+  }
+
+  private async hideNewControlFile(controlFile: string) {
+    const stat = await fs.promises.stat(controlFile).catch(() => null);
+    if (!stat || stat.mtimeMs === this.controlFileMtime) return;
+    this.controlFileMtime = stat.mtimeMs;
+    await hideControlFile(controlFile);
   }
 
   private finish(error?: Error) {

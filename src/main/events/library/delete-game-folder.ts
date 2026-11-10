@@ -12,6 +12,7 @@ import {
   removeRangeState,
   removeResourceIdentity,
 } from "@main/services/download/range-download-state";
+import { Aria2Downloader } from "@main/services/download/aria2-downloader";
 import { Downloader } from "@shared";
 import { getEpicDownloadService } from "@main/services/epic/download";
 import { hasManagedEpicSession } from "@main/services/epic/launch";
@@ -201,6 +202,10 @@ const deleteGameFolder = async (
       logger.warn("Failed to remove download resume state", error);
     }
     await deleteFile(`${folderPath}.hydra-segments.json`);
+    // Fork: aria2's control file; wait in case a just-paused aria2 is still
+    // writing it.
+    await Aria2Downloader.waitForPendingShutdown();
+    await deleteFile(`${folderPath}.aria2`);
   }
 
   const sourceArchivePath = options.deleteSourceArchive
