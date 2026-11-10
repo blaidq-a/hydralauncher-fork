@@ -2,12 +2,15 @@ import axios from "axios";
 import { HOSTER_USER_AGENT } from "./hoster-user-agent.js";
 
 const HOSTS = ["buzzheavier.com", "bzzhr.to", "bzzhr.co", "fuckingfast.net"];
-// Permanent page links that only resolve when opened from SteamRIP (the
-// server checks the Referer), so they need the SteamRIP game page as Referer.
 const REFERER_GATED_HOSTS = ["buzzheavier.com", "bzzhr.to", "bzzhr.co"];
 const DIRECT_DOWNLOAD_HOSTS = ["ts.bzzhr.to", "flashbang.sh"];
+
 const DOWNLOAD_ACTION_PATTERN =
   /hx-(get|post)\s*=\s*(["'])([^"']*\/download(?:[/?#][^"']*)?)\2/i;
+
+// Direct CDN link regex (Python scraper'daki ts.bzzhr.to/d/ yakalama mantığı)
+const DIRECT_CDN_REGEX =
+  /https?:\/\/(?:ts\.bzzhr\.to|flashbang\.sh|buzzheavier\.com)\/d\/[a-zA-Z0-9_-]+/gi;
 
 function isHttpUrl(value: string, baseUrl: string): string | undefined {
   try {
@@ -58,10 +61,25 @@ export function extractBuzzheavierRedirect(
   return undefined;
 }
 
+/** Python scraper'ındaki HTML içi CDN adresi ve şifrelenmiş link arama mantığı */
+export function extractDirectCdnFromHtml(html: string): string | undefined {
+  const matches = html.match(DIRECT_CDN_REGEX);
+  if (matches && matches.length > 0) {
+    return matches[0];
+  }
+  return undefined;
+}
+
+export function extractBuzzheavierDownloadToken(
+  html: string
+): string | undefined {
+  const match = /\/download\?t=([^"'&\\#\s<>]+)/i.exec(html);
+  return match?.[1];
+}
+
 const matchesHost = (hostname: string, hosts: string[]) =>
   hosts.some((host) => hostname === host || hostname.endsWith(`.${host}`));
 
-/** True for permanent `bzzhr.to/<id>` / `buzzheavier.com/<id>` page links. */
 export function isBuzzheavierPageLink(uri: string): boolean {
   try {
     const hostname = new URL(uri).hostname.toLowerCase();
@@ -74,7 +92,6 @@ export function isBuzzheavierPageLink(uri: string): boolean {
   }
 }
 
-/** Turns `Set-Cookie` headers into a `Cookie` request header value. */
 export function toCookieHeader(setCookie: unknown): string | undefined {
   const values = Array.isArray(setCookie)
     ? setCookie
@@ -89,15 +106,7 @@ export function toCookieHeader(setCookie: unknown): string | undefined {
 }
 
 export interface BuzzheavierResolveOptions {
-  /** Page that linked to the file (the SteamRIP game page). */
   referer?: string;
-}
-
-export function extractBuzzheavierDownloadToken(
-  html: string
-): string | undefined {
-  const match = /\/download\?t=([^"'&\\#\s<>]+)/i.exec(html);
-  return match?.[1];
 }
 
 export class BuzzheavierApi {
@@ -129,22 +138,33 @@ export class BuzzheavierApi {
       return uri;
     }
 
+    // 1. ADIM: Sayfa HTML'ini tam tarayıcı başlıklarıyla (Browser Fingerprint) çek
     const pageResponse = await axios.get<string>(uri, {
       headers: {
         "User-Agent": HOSTER_USER_AGENT,
-        Accept: "text/html,application/xhtml+xml",
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "cross-site",
+        "Upgrade-Insecure-Requests": "1",
         ...(options.referer ? { Referer: options.referer } : {}),
       },
       timeout: 30000,
     });
 
-    // Carry the page's session cookies into the download request, like a
-    // browser would after opening the page from SteamRIP.
-    const cookieHeader = toCookieHeader(pageResponse.headers?.["set-cookie"]);
+    const html = pageResponse.data;
 
+    // 2. ADIM (Python Scraper Mantığı): HTML içeriğinde doğrudan ts.bzzhr.to/d/ adresi var mı kontrol et
+    const directCdnInHtml = extractDirectCdnFromHtml(html);
+    if (directCdnInHtml) {
+      return directCdnInHtml;
+    }
+
+    const cookieHeader = toCookieHeader(pageResponse.headers?.["set-cookie"]);
     const pageUrl = pageResponse.request?.res?.responseUrl || uri;
-    const action = extractBuzzheavierDownloadAction(pageResponse.data, pageUrl);
-    const token = extractBuzzheavierDownloadToken(pageResponse.data);
+    const action = extractBuzzheavierDownloadAction(html, pageUrl);
+    const token = extractBuzzheavierDownloadToken(html);
     const fallback = new URL(pageUrl);
     fallback.pathname = `${fallback.pathname.replace(/\/+$/, "")}/download`;
     const endpointUrl = new URL(action?.url ?? fallback.href);
@@ -154,6 +174,7 @@ export class BuzzheavierApi {
     const endpoint = endpointUrl.href;
     const method = action?.method ?? "get";
 
+    // 3. ADIM: HTMX indirme isteğini tarayıcı taklidi başlıklarıyla gönder
     const downloadResponse = await axios.request<string>({
       url: endpoint,
       method,
@@ -162,8 +183,13 @@ export class BuzzheavierApi {
       headers: {
         "User-Agent": HOSTER_USER_AGENT,
         Accept: "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
         "HX-Request": "true",
+        "HX-Target": "body",
         "HX-Current-URL": pageUrl,
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
         Referer: pageUrl,
         ...(cookieHeader ? { Cookie: cookieHeader } : {}),
       },
@@ -175,6 +201,10 @@ export class BuzzheavierApi {
         ? extractBuzzheavierRedirect(downloadResponse.headers, endpoint)
         : undefined;
     if (directUrl) return directUrl;
+
+    // HTML içinde dinamik JS değişkeni veya script bloğundaki CDN adresini ara
+    const fallbackCdn = extractDirectCdnFromHtml(downloadResponse.data);
+    if (fallbackCdn) return fallbackCdn;
 
     throw new Error(
       `Buzzheavier did not return a downloadable CDN redirect (HTTP ${downloadResponse.status})`
