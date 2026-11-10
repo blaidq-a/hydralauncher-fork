@@ -70,16 +70,7 @@ const CONNECTION_REGROW_CHECK_MS = 5_000;
  * after a long quiet period. 429s arriving together count as one event.
  */
 const CONNECTION_CEILING_PROBE_QUIET_MS = 60_000;
-// Fork: 429s keep arriving for a while once a host starts refusing; lowering
-// the limit on each one walked Gofile down from 13 to 6 connections in 20 s.
-const RATE_LIMIT_BURST_WINDOW_MS = 15_000;
-/**
- * Fork: like FDM, a connection that runs out of work takes over the second
- * half of the largest range still downloading instead of stopping. With
- * very large ranges each connection makes one request for a big part of the
- * file, so hosts that refuse frequent requests (Gofile) are rarely asked.
- */
-const MIN_SPLIT_BYTES = 16 * 1024 * 1024;
+const RATE_LIMIT_BURST_WINDOW_MS = 2_000;
 
 const waitFor = (ms: number, signal: AbortSignal) =>
   new Promise<void>((resolve, reject) => {
@@ -337,26 +328,8 @@ export async function downloadParallelRanges({
     staggerFirstRound && index > 0 && index < connectionCount
       ? Math.max(1, Math.round((rangeSize * index) / connectionCount))
       : rangeSize;
-  // Fork: reuse the first response for whatever range it covers, so a
-  // response for a whole large range is not left open unused.
-  const probeRange = /^bytes (\d+)-(\d+)\//i.exec(
-    firstResponse.status === 206
-      ? (firstResponse.headers.get("content-range") ?? "")
-      : ""
-  );
   for (const [start, end] of missingRanges(state)) {
-    let offset = start;
-    if (
-      jobs.length === 0 &&
-      maxRanges === Infinity &&
-      probeRange &&
-      Number(probeRange[1]) === start &&
-      Number(probeRange[2]) < end
-    ) {
-      offset = Number(probeRange[2]) + 1;
-      jobs.push({ start, end: offset - 1 });
-    }
-    while (offset < end && jobs.length < maxRanges) {
+    for (let offset = start; offset < end && jobs.length < maxRanges; ) {
       const next = Math.min(offset + rangeSizeFor(jobs.length), end);
       jobs.push({ start: offset, end: next - 1 });
       offset = next;
@@ -397,32 +370,6 @@ export async function downloadParallelRanges({
   let connectionCeiling = Number.POSITIVE_INFINITY;
   let lastCeilingDropAt = 0;
   const rateLimitedRanges = new Map<number, number>();
-  // Ranges currently streaming, with how far each has got (written plus
-  // buffered bytes); used to split the largest one for an idle connection.
-  const streamingRanges = new Map<ByteRange, () => number>();
-  const splittableRange = () => {
-    if (maxRanges !== Infinity) return null;
-    let best: ByteRange | null = null;
-    let bestRemaining = 2 * MIN_SPLIT_BYTES - 1;
-    for (const [range, streamed] of streamingRanges) {
-      const remaining = range.end + 1 - (range.start + streamed());
-      if (remaining > bestRemaining) {
-        best = range;
-        bestRemaining = remaining;
-      }
-    }
-    return best ? { range: best, remaining: bestRemaining } : null;
-  };
-  const splitLargestRange = (): ByteRange | undefined => {
-    const candidate = splittableRange();
-    if (!candidate) return undefined;
-    const { range, remaining } = candidate;
-    const middle = range.end + 1 - Math.floor(remaining / 2);
-    const job = { start: middle, end: range.end };
-    // The running connection stops reading at its new end.
-    range.end = middle - 1;
-    return job;
-  };
   // Numbers ranges in log messages.
   let rangeCounter = 0;
   const stallRetries = new Map<number, number>();
@@ -567,10 +514,6 @@ export async function downloadParallelRanges({
     };
     armStallTimer();
     let received = 0;
-    let buffered = 0;
-    // The request covered this much even if the range is split later.
-    const requestedLength = range.end - range.start + 1;
-    streamingRanges.set(range, () => received + buffered);
     const writeChunk = async (
       chunk: Uint8Array,
       written = 0
@@ -615,11 +558,13 @@ export async function downloadParallelRanges({
             : Buffer.concat(pendingChunks, pendingBytes);
         pendingChunks = [];
         pendingBytes = 0;
-        buffered = 0;
         await writeChunk(block);
       };
       for await (const chunk of chunks) {
-        if (received + pendingBytes + chunk.length > requestedLength) {
+        if (
+          received + pendingBytes + chunk.length >
+          range.end - range.start + 1
+        ) {
           throw new ParallelRangeUnsupportedError(
             "The server sent more data than the requested byte range"
           );
@@ -628,21 +573,9 @@ export async function downloadParallelRanges({
         await beforeChunk(chunk.length);
         signal.throwIfAborted();
         if (checkpointError) throw checkpointError;
-        // Another connection may have taken over the end of this range.
-        const room = range.end - range.start + 1 - received - pendingBytes;
-        const part = chunk.length > room ? chunk.subarray(0, room) : chunk;
-        if (part.length > 0) {
-          pendingChunks.push(part);
-          pendingBytes += part.length;
-          buffered = pendingBytes;
-        }
-        if (
-          pendingBytes >= WRITE_BATCH_BYTES ||
-          received + pendingBytes >= range.end - range.start + 1
-        ) {
-          await flushPending();
-        }
-        if (received >= range.end - range.start + 1) break;
+        pendingChunks.push(chunk);
+        pendingBytes += chunk.length;
+        if (pendingBytes >= WRITE_BATCH_BYTES) await flushPending();
         if (Date.now() - lastCheckpoint >= RANGE_CHECKPOINT_INTERVAL_MS) {
           lastCheckpoint = Date.now();
           persistInBackground();
@@ -655,7 +588,6 @@ export async function downloadParallelRanges({
       // written and retry the rest of this range only.
       if (!stalled || signal.aborted) throw error;
     } finally {
-      streamingRanges.delete(range);
       stopStallTimer();
       await reader.cancel().catch(() => undefined);
       reader.releaseLock();
@@ -675,11 +607,8 @@ export async function downloadParallelRanges({
   const worker = () => {
     activeConnections += 1;
     return runDownloadQueue(() => {
-      // Fork: a requeued range is inserted at nextJob, so nextJob must not
-      // run past the end of the list.
-      if (nextJob < jobs.length) return runRange(jobs[nextJob++]);
-      const split = splitLargestRange();
-      return split ? runRange(split) : undefined;
+      const job = jobs[nextJob++];
+      return job ? runRange(job) : undefined;
     }, signal).then(
       () => {
         // Ran out of work; no longer counts as an open connection.
@@ -720,19 +649,14 @@ export async function downloadParallelRanges({
       .finally(() => runningWorkers.delete(tracked));
     runningWorkers.add(tracked);
   };
-  // With splitting, every connection can get work even if there are fewer
-  // ranges than connections at the start.
-  const targetConnections =
-    maxRanges === Infinity
-      ? connectionCount
-      : Math.min(connectionCount, jobs.length);
+  const targetConnections = Math.min(connectionCount, jobs.length);
   const regrowTimer = setInterval(() => {
     const quietFor = Date.now() - lastRateLimitAt;
     if (
       hasWorkerError ||
       signal.aborted ||
       activeConnections + pendingStarts >= targetConnections ||
-      (nextJob >= jobs.length && !splittableRange()) ||
+      nextJob >= jobs.length ||
       quietFor < CONNECTION_REGROW_QUIET_MS
     ) {
       return;
