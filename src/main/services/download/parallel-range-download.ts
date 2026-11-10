@@ -47,7 +47,7 @@ class RetireConnectionSignal extends Error {}
  * Fork: open connections gradually (like FDM) instead of all at once; some
  * hosters (Gofile) answer a burst of simultaneous requests with HTTP 429.
  */
-const CONNECTION_START_INTERVAL_MS = 250;
+const CONNECTION_START_INTERVAL_MS = 500;
 const RATE_LIMIT_RETRY_MIN_MS = 1000;
 const RATE_LIMIT_RETRY_MAX_MS = 5000;
 /**
@@ -55,8 +55,8 @@ const RATE_LIMIT_RETRY_MAX_MS = 5000;
  * for its next range; without this the connection count only went down over
  * a long download. After a quiet period a dropped connection is added back.
  */
-const CONNECTION_REGROW_QUIET_MS = 30_000;
-const CONNECTION_REGROW_CHECK_MS = 10_000;
+const CONNECTION_REGROW_QUIET_MS = 15_000;
+const CONNECTION_REGROW_CHECK_MS = 5_000;
 
 const waitFor = (ms: number, signal: AbortSignal) =>
   new Promise<void>((resolve, reject) => {
