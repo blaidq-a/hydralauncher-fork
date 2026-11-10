@@ -31,7 +31,8 @@ import {
   PARALLEL_RANGE_SIZE,
   ParallelRangeUnsupportedError,
   ParallelRangeHttpStatusError,
-  shouldDowngradeParallelRanges,
+  PARALLEL_RANGE_COUNT,
+  reduceParallelConnections,
 } from "./parallel-range-download";
 
 import {
@@ -141,7 +142,8 @@ export class JsHttpDownloader {
   private recoverBytesAtLastUpdate = 0;
   private readonly throttle = new DownloadThrottle();
   private parallelRangesDisabled = false;
-  private parallelRangeFailures = 0;
+  /** Fork: lowered connection count after failures (null = as requested). */
+  private parallelConnectionLimit: number | null = null;
   private resourceValidator: string | null = null;
   private savedRangeState: RangeDownloadState | null = null;
   private verifyUnvalidatedResumeOverlap = false;
@@ -177,7 +179,7 @@ export class JsHttpDownloader {
     this.resolvedFilename = null;
     this.pendingReadSince = null;
     this.parallelRangesDisabled = false;
-    this.parallelRangeFailures = 0;
+    this.parallelConnectionLimit = null;
     this.resourceValidator = null;
     this.savedRangeState = null;
     this.verifyUnvalidatedResumeOverlap = false;
@@ -846,7 +848,8 @@ export class JsHttpDownloader {
             resourceId: this.currentOptions?.resourceId,
             connectionCount: this.parallelRangesDisabled
               ? 1
-              : this.currentOptions?.parallelRangeConnections,
+              : (this.parallelConnectionLimit ??
+                this.currentOptions?.parallelRangeConnections),
             maxRanges: this.parallelRangesDisabled
               ? Infinity
               : this.currentOptions?.maxParallelRanges,
@@ -875,11 +878,19 @@ export class JsHttpDownloader {
             !(error instanceof ParallelRangeUnsupportedError) &&
             (this.isStallRetry || isRetryableDownloadError(error))
           ) {
-            this.parallelRangeFailures++;
-            if (
-              shouldDowngradeParallelRanges(error, this.parallelRangeFailures)
-            )
+            const current =
+              this.parallelConnectionLimit ??
+              this.currentOptions?.parallelRangeConnections ??
+              PARALLEL_RANGE_COUNT;
+            const next = reduceParallelConnections(current, error);
+            if (next === null) {
               this.parallelRangesDisabled = true;
+            } else if (next < current) {
+              this.parallelConnectionLimit = next;
+              logger.log(
+                `[JsHttpDownloader] Reducing parallel connections to ${next} after a failed attempt`
+              );
+            }
           }
           const committed = getRangeDownloadedBytes(actualFilePath);
           this.bytesDownloaded = committed;

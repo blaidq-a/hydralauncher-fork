@@ -137,6 +137,9 @@ const HOSTER_PARALLEL_CONNECTIONS_BY_DOWNLOADER: Partial<
   Record<Downloader, number>
 > = {
   [Downloader.Gofile]: 8,
+  // Buzzheavier caps each connection at ~3.5 MB/s (measured), so 16
+  // connections stop at ~450 Mbps and swing with every connection.
+  [Downloader.Buzzheavier]: 32,
 };
 const DIRECT_HOSTER_DOWNLOADERS = new Set<Downloader>([
   Downloader.Gofile,

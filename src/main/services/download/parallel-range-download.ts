@@ -1,4 +1,5 @@
 import { runDownloadQueue } from "./download-work-queue.js";
+import { logger } from "./download-logger.js";
 import fs from "node:fs";
 import {
   markSavedRange,
@@ -11,8 +12,28 @@ import {
 } from "./range-download-state.js";
 
 const PARALLEL_RANGE_FAILURE_LIMIT = 2;
-const MAX_PARALLEL_CONNECTIONS = 16;
-const RANGE_CHECKPOINT_INTERVAL_MS = 1000;
+// Fork: raised from 16. Some hosters cap every connection at a few MB/s
+// (Buzzheavier ~3.5 MB/s), so line speed needs more connections.
+export const MAX_PARALLEL_CONNECTIONS = 32;
+// Fork: the checkpoint fsyncs the whole (often 50-100 GB) file. Doing it
+// every second forced constant disk flushes and stalled the connection that
+// waited for it; checkpoints now run in the background every few seconds.
+const RANGE_CHECKPOINT_INTERVAL_MS = 5000;
+/**
+ * Fork: network chunks are only 16-64 KB. Writing each one separately meant
+ * thousands of write calls per second sharing libuv's four file threads (and
+ * every one inspected by antivirus filters), which capped the total speed no
+ * matter how many connections were used. Each range now writes 2 MB blocks.
+ */
+const WRITE_BATCH_BYTES = 2 * 1024 * 1024;
+/**
+ * Fork: a single connection that stops receiving data is restarted on its
+ * own. Upstream only had the downloader-wide 30 s stall check, which aborted
+ * every connection (and on hosters with dozens of connections, restarted all
+ * of them) because one of them hung.
+ */
+const RANGE_STALL_TIMEOUT_MS = 20_000;
+const MAX_RANGE_STALL_RETRIES = 5;
 const STRONG_LAST_MODIFIED_AGE_MS = 60_000;
 
 export const PARALLEL_RANGE_SIZE = 8 * 1024 * 1024;
@@ -54,6 +75,29 @@ export function shouldDowngradeParallelRanges(
     error instanceof ParallelRangeUnsupportedError ||
     failureCount >= PARALLEL_RANGE_FAILURE_LIMIT
   );
+}
+
+/**
+ * Fork: connection count to use after a parallel attempt failed, or null to
+ * stop using byte ranges. Upstream switched to a single connection after any
+ * two transient failures, which on per-connection throttled hosters dropped
+ * the rest of the download to a few MB/s. Now only a server that does not
+ * honour ranges disables them; rate limits halve the connections down to 2,
+ * other transient failures down to 4.
+ */
+export function reduceParallelConnections(
+  current: number,
+  error: unknown
+): number | null {
+  if (error instanceof ParallelRangeUnsupportedError) return null;
+
+  const rateLimited =
+    error instanceof ParallelRangeHttpStatusError &&
+    (error.statusCode === 429 || error.statusCode === 503);
+  const minimum = rateLimited ? 2 : 4;
+
+  if (current <= minimum) return current;
+  return Math.max(minimum, Math.floor(current / 2));
 }
 
 export function getRangeTotal(
@@ -244,10 +288,63 @@ export async function downloadParallelRanges({
     });
     return checkpoint;
   };
+  let checkpointError: unknown = null;
+  const persistInBackground = () => {
+    persist().catch((error: unknown) => {
+      checkpointError ??= error;
+    });
+  };
   let nextJob = 0;
   let firstUsed = false;
+  // Numbers ranges in log messages.
+  let rangeCounter = 0;
+  const stallRetries = new Map<number, number>();
   const runRange = async (range: ByteRange): Promise<void> => {
     signal.throwIfAborted();
+    const rangeNumber = ++rangeCounter;
+
+    // Per-range stall watchdog; re-armed whenever data arrives.
+    const rangeController = new AbortController();
+    const abortRange = () => rangeController.abort(signal.reason);
+    signal.addEventListener("abort", abortRange, { once: true });
+    let stalled = false;
+    let cancelBody: (() => void) | null = null;
+    let stallTimer: ReturnType<typeof setTimeout> | null = null;
+    const armStallTimer = () => {
+      if (stallTimer) clearTimeout(stallTimer);
+      stallTimer = setTimeout(() => {
+        stalled = true;
+        rangeController.abort();
+        cancelBody?.();
+      }, RANGE_STALL_TIMEOUT_MS);
+    };
+    const stopStallTimer = () => {
+      if (stallTimer) clearTimeout(stallTimer);
+      stallTimer = null;
+      signal.removeEventListener("abort", abortRange);
+    };
+
+    const requeueRemainder = (receivedBytes: number) => {
+      const retries = (stallRetries.get(range.start) ?? 0) + 1;
+      stallRetries.set(range.start, retries);
+      if (retries > MAX_RANGE_STALL_RETRIES) {
+        const error = new Error("A byte range stalled repeatedly") as Error & {
+          retryable: boolean;
+        };
+        error.retryable = true;
+        throw error;
+      }
+      const remainder = { start: range.start + receivedBytes, end: range.end };
+      stallRetries.set(remainder.start, retries);
+      // Next in line, so the first free connection resumes it right away
+      // instead of leaving it for the very end of the download.
+      jobs.splice(nextJob, 0, remainder);
+      logger.log(
+        `[JsHttpDownloader] Range #${rangeNumber} stalled for ${RANGE_STALL_TIMEOUT_MS / 1000}s; retrying only that range (${retries}/${MAX_RANGE_STALL_RETRIES})`
+      );
+    };
+
+    armStallTimer();
     let response: Response;
     const probeTotal = getRangeTotal(firstResponse, range.start, range.end);
     if (!firstUsed && probeTotal === total) {
@@ -262,8 +359,16 @@ export async function downloadParallelRanges({
             Range: `bytes=${range.start}-${range.end}`,
             "If-Range": validator,
           },
-          signal,
+          signal: rangeController.signal,
         });
+      } catch (error) {
+        if (stalled && !signal.aborted) {
+          stopStallTimer();
+          requeueRemainder(0);
+          return;
+        }
+        stopStallTimer();
+        throw error;
       } finally {
         onReadPending(range.start, false);
       }
@@ -283,8 +388,15 @@ export async function downloadParallelRanges({
         "The download server stopped serving matching byte ranges"
       );
     }
-    if (!response.body) throw new Error("Range response body is null");
+    if (!response.body) {
+      stopStallTimer();
+      throw new Error("Range response body is null");
+    }
     const reader = response.body.getReader();
+    cancelBody = () => {
+      reader.cancel().catch(() => undefined);
+    };
+    armStallTimer();
     let received = 0;
     const writeChunk = async (
       chunk: Uint8Array,
@@ -318,24 +430,55 @@ export async function downloadParallelRanges({
           },
         }),
       };
+      // Bytes held in memory are not marked as saved until written, so a
+      // pause or failure only re-downloads them; the saved map stays exact.
+      let pendingChunks: Uint8Array[] = [];
+      let pendingBytes = 0;
+      const flushPending = async () => {
+        if (pendingBytes === 0) return;
+        const block =
+          pendingChunks.length === 1
+            ? pendingChunks[0]
+            : Buffer.concat(pendingChunks, pendingBytes);
+        pendingChunks = [];
+        pendingBytes = 0;
+        await writeChunk(block);
+      };
       for await (const chunk of chunks) {
-        if (received + chunk.length > range.end - range.start + 1) {
+        if (
+          received + pendingBytes + chunk.length >
+          range.end - range.start + 1
+        ) {
           throw new ParallelRangeUnsupportedError(
             "The server sent more data than the requested byte range"
           );
         }
+        armStallTimer();
         await beforeChunk(chunk.length);
         signal.throwIfAborted();
-        await writeChunk(chunk);
+        if (checkpointError) throw checkpointError;
+        pendingChunks.push(chunk);
+        pendingBytes += chunk.length;
+        if (pendingBytes >= WRITE_BATCH_BYTES) await flushPending();
         if (Date.now() - lastCheckpoint >= RANGE_CHECKPOINT_INTERVAL_MS) {
           lastCheckpoint = Date.now();
-          await persist();
+          persistInBackground();
         }
         signal.throwIfAborted();
       }
+      await flushPending();
+    } catch (error) {
+      // A stalled body read may reject instead of ending; keep what was
+      // written and retry the rest of this range only.
+      if (!stalled || signal.aborted) throw error;
     } finally {
+      stopStallTimer();
       await reader.cancel().catch(() => undefined);
       reader.releaseLock();
+    }
+    if (stalled && !signal.aborted && received < range.end - range.start + 1) {
+      requeueRemainder(received);
+      return;
     }
     if (received !== range.end - range.start + 1) {
       const error = new Error(
