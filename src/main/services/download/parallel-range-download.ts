@@ -34,6 +34,39 @@ const WRITE_BATCH_BYTES = 2 * 1024 * 1024;
  */
 const RANGE_STALL_TIMEOUT_MS = 20_000;
 const MAX_RANGE_STALL_RETRIES = 5;
+
+/**
+ * Fork: thrown inside a worker whose connection the server refused with
+ * 429/503 while other connections keep working. The worker stops, its range
+ * goes back to the queue, and the download continues with one connection
+ * less; it settles at the number of connections the host allows.
+ */
+class RetireConnectionSignal extends Error {}
+
+/**
+ * Fork: open connections gradually (like FDM) instead of all at once; some
+ * hosters (Gofile) answer a burst of simultaneous requests with HTTP 429.
+ */
+const CONNECTION_START_INTERVAL_MS = 250;
+const RATE_LIMIT_RETRY_MIN_MS = 1000;
+const RATE_LIMIT_RETRY_MAX_MS = 5000;
+
+const waitFor = (ms: number, signal: AbortSignal) =>
+  new Promise<void>((resolve, reject) => {
+    if (signal.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
 const STRONG_LAST_MODIFIED_AGE_MS = 60_000;
 
 export const PARALLEL_RANGE_SIZE = 8 * 1024 * 1024;
@@ -296,6 +329,8 @@ export async function downloadParallelRanges({
   };
   let nextJob = 0;
   let firstUsed = false;
+  let activeConnections = 0;
+  const rateLimitedRanges = new Set<number>();
   // Numbers ranges in log messages.
   let rangeCounter = 0;
   const stallRetries = new Map<number, number>();
@@ -374,10 +409,43 @@ export async function downloadParallelRanges({
       }
     }
     if (
+      (response.status === 429 || response.status === 503) &&
+      activeConnections > 1
+    ) {
+      await response.body?.cancel().catch(() => undefined);
+      stopStallTimer();
+      jobs.splice(nextJob, 0, range);
+
+      // A single 429 is often momentary (a just-finished connection still
+      // counted by the server): wait and try again before giving up a
+      // connection for good.
+      if (!rateLimitedRanges.has(range.start)) {
+        rateLimitedRanges.add(range.start);
+        const retryAfterSeconds = Number(response.headers.get("retry-after"));
+        const waitMs = Math.min(
+          RATE_LIMIT_RETRY_MAX_MS,
+          Math.max(
+            RATE_LIMIT_RETRY_MIN_MS,
+            Number.isFinite(retryAfterSeconds) ? retryAfterSeconds * 1000 : 0
+          )
+        );
+        await waitFor(waitMs, signal);
+        return;
+      }
+
+      activeConnections -= 1;
+      logger.log(
+        `[JsHttpDownloader] Server limited parallel connections (HTTP ${response.status}); continuing with ${activeConnections}`
+      );
+      throw new RetireConnectionSignal();
+    }
+    rateLimitedRanges.delete(range.start);
+    if (
       getRangeTotal(response, range.start, range.end) !== total ||
       getStrongRangeValidator(response) !== validator
     ) {
       await response.body?.cancel();
+      stopStallTimer();
       if (response.status >= 400) {
         throw new ParallelRangeHttpStatusError(
           response.status,
@@ -488,17 +556,35 @@ export async function downloadParallelRanges({
       throw error;
     }
   };
-  const worker = () =>
-    runDownloadQueue(() => {
+  const worker = () => {
+    activeConnections += 1;
+    return runDownloadQueue(() => {
       const job = jobs[nextJob++];
       return job ? runRange(job) : undefined;
-    }, signal);
+    }, signal).then(
+      () => {
+        // Ran out of work; no longer counts as an open connection.
+        activeConnections -= 1;
+      },
+      (error: unknown) => {
+        // A retired connection was already uncounted; the others carry on.
+        if (error instanceof RetireConnectionSignal) return;
+        throw error;
+      }
+    );
+  };
+  const startWorker = async (index: number) => {
+    if (index > 0) {
+      await waitFor(index * CONNECTION_START_INTERVAL_MS, signal);
+    }
+    return worker();
+  };
   let workers: Promise<void>[] = [];
   try {
     await persist();
     workers = Array.from(
       { length: Math.min(connectionCount, jobs.length) },
-      () => worker()
+      (_, index) => startWorker(index)
     );
     try {
       await Promise.all(workers);

@@ -129,14 +129,13 @@ const DEFAULT_REAL_DEBRID_CONNECTIONS = 4;
 const BUZZHEAVIER_RESOLVE_RETRY_DELAYS_MS = [1500, 3000];
 const MEGADB_REFERER = "https://steamrip.com/";
 // Fork: direct hosters throttle each connection, so the upstream default of
-// 4 parallel ranges is far slower than the old fork engine. Use the engine's
-// maximum (16); Gofile rate-limits (HTTP 429) above ~8 connections. The
-// engine still downgrades on its own when a host rejects parallel ranges.
+// 4 parallel ranges is far slower than the old fork engine. Connections open
+// gradually and the engine drops any the host refuses (HTTP 429), so hosters
+// with connection limits (Gofile) settle at what they allow.
 const HOSTER_PARALLEL_CONNECTIONS = 16;
 const HOSTER_PARALLEL_CONNECTIONS_BY_DOWNLOADER: Partial<
   Record<Downloader, number>
 > = {
-  [Downloader.Gofile]: 8,
   // Buzzheavier caps each connection at ~3.5 MB/s (measured), so 16
   // connections stop at ~450 Mbps and swing with every connection.
   [Downloader.Buzzheavier]: 32,

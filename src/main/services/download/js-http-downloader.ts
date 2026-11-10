@@ -876,7 +876,11 @@ export class JsHttpDownloader {
             !this.isPaused &&
             !this.isReconnectRetry &&
             !(error instanceof ParallelRangeUnsupportedError) &&
-            (this.isStallRetry || isRetryableDownloadError(error))
+            (this.isStallRetry ||
+              isRetryableDownloadError(error) ||
+              // Fork: every connection was rate limited; retry with fewer.
+              (error instanceof ParallelRangeHttpStatusError &&
+                isRetryableHttpStatus(error.statusCode)))
           ) {
             const current =
               this.parallelConnectionLimit ??
