@@ -48,14 +48,33 @@ class RetireConnectionSignal extends Error {}
  * hosters (Gofile) answer a burst of simultaneous requests with HTTP 429.
  */
 const CONNECTION_START_INTERVAL_MS = 500;
-const RATE_LIMIT_RETRY_MIN_MS = 1000;
-const RATE_LIMIT_RETRY_MAX_MS = 5000;
+const RATE_LIMIT_RETRY_MIN_MS = 2000;
+const RATE_LIMIT_RETRY_MAX_MS = 16_000;
 /**
  * Fork: a refused request is retried on the same connection with a growing
- * wait (1, 2, 4 s) before the connection is given up. Dropping it on the
- * second 429 made the speed fall for the ~15 s it took to add it back.
+ * wait (2, 4, 8, 16 s) before the connection is given up. Gofile keeps
+ * counting just-closed connections for a while; dropping one after a few
+ * seconds made the speed fall for the ~15 s it took to add it back.
  */
-const RATE_LIMIT_RETRIES_PER_RANGE = 3;
+const RATE_LIMIT_RETRIES_PER_RANGE = 4;
+/**
+ * Fork: a connection error (connect timeout, reset) on one range retries
+ * only that range. Upstream failed the whole attempt, which closed every
+ * connection, halved their number and triggered 429s on reconnect.
+ */
+const NETWORK_RETRY_DELAY_MS = 1000;
+const isNetworkError = (error: unknown): boolean => {
+  if (error instanceof TypeError) return true; // undici "fetch failed"/"terminated"
+  const code =
+    (error as { code?: unknown; cause?: { code?: unknown } })?.cause?.code ??
+    (error as { code?: unknown })?.code;
+  return (
+    typeof code === "string" &&
+    /^(UND_ERR|ECONN|ETIMEDOUT|EPIPE|ENOTFOUND|EAI_AGAIN|ENETUNREACH)/.test(
+      code
+    )
+  );
+};
 /**
  * Fork: hosts like Gofile return an occasional 429 when a connection asks
  * for its next range; without this the connection count only went down over
@@ -80,6 +99,15 @@ const RATE_LIMIT_BURST_WINDOW_MS = 15_000;
  * file, so hosts that refuse frequent requests (Gofile) are rarely asked.
  */
 const MIN_SPLIT_BYTES = 16 * 1024 * 1024;
+
+const describeError = (error: unknown) => {
+  const code = (error as { cause?: { code?: unknown } })?.cause?.code;
+  return typeof code === "string"
+    ? code
+    : error instanceof Error
+      ? error.message
+      : String(error);
+};
 
 const waitFor = (ms: number, signal: AbortSignal) =>
   new Promise<void>((resolve, reject) => {
@@ -451,7 +479,7 @@ export async function downloadParallelRanges({
       signal.removeEventListener("abort", abortRange);
     };
 
-    const requeueRemainder = (receivedBytes: number) => {
+    const requeueRemainder = (receivedBytes: number, reason?: string) => {
       const retries = (stallRetries.get(range.start) ?? 0) + 1;
       stallRetries.set(range.start, retries);
       if (retries > MAX_RANGE_STALL_RETRIES) {
@@ -467,7 +495,7 @@ export async function downloadParallelRanges({
       // instead of leaving it for the very end of the download.
       jobs.splice(nextJob, 0, remainder);
       logger.log(
-        `[JsHttpDownloader] Range #${rangeNumber} stalled for ${RANGE_STALL_TIMEOUT_MS / 1000}s; retrying only that range (${retries}/${MAX_RANGE_STALL_RETRIES})`
+        `[JsHttpDownloader] Range #${rangeNumber} ${reason ?? `stalled for ${RANGE_STALL_TIMEOUT_MS / 1000}s`}; retrying only that range (${retries}/${MAX_RANGE_STALL_RETRIES})`
       );
     };
 
@@ -495,6 +523,11 @@ export async function downloadParallelRanges({
           return;
         }
         stopStallTimer();
+        if (!signal.aborted && isNetworkError(error)) {
+          requeueRemainder(0, `could not connect (${describeError(error)})`);
+          await waitFor(NETWORK_RETRY_DELAY_MS, signal);
+          return;
+        }
         throw error;
       } finally {
         onReadPending(range.start, false);
@@ -568,6 +601,7 @@ export async function downloadParallelRanges({
     armStallTimer();
     let received = 0;
     let buffered = 0;
+    let networkError: unknown = null;
     // The request covered this much even if the range is split later.
     const requestedLength = range.end - range.start + 1;
     streamingRanges.set(range, () => received + buffered);
@@ -651,9 +685,13 @@ export async function downloadParallelRanges({
       }
       await flushPending();
     } catch (error) {
-      // A stalled body read may reject instead of ending; keep what was
-      // written and retry the rest of this range only.
-      if (!stalled || signal.aborted) throw error;
+      // A stalled or dropped body read rejects; keep what was written and
+      // retry the rest of this range only.
+      if (signal.aborted) throw error;
+      if (!stalled) {
+        if (!isNetworkError(error)) throw error;
+        networkError = error;
+      }
     } finally {
       streamingRanges.delete(range);
       stopStallTimer();
@@ -662,6 +700,14 @@ export async function downloadParallelRanges({
     }
     if (stalled && !signal.aborted && received < range.end - range.start + 1) {
       requeueRemainder(received);
+      return;
+    }
+    if (networkError && received < range.end - range.start + 1) {
+      requeueRemainder(
+        received,
+        `lost its connection (${describeError(networkError)})`
+      );
+      await waitFor(NETWORK_RETRY_DELAY_MS, signal);
       return;
     }
     if (received !== range.end - range.start + 1) {
