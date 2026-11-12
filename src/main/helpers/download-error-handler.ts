@@ -1,4 +1,5 @@
 import { AxiosError } from "axios";
+import { GOFILE_UNEXPECTED_RESPONSE_MESSAGE } from "@main/services/hosters/gofile-errors";
 import {
   Downloader,
   DownloadError,
@@ -288,6 +289,14 @@ const handleHostSpecificError = (
       )
     ) {
       return { ok: false, error: DownloadError.HosterUnlockFileNotFound };
+    }
+
+    if (
+      normalizedMessage.includes(
+        GOFILE_UNEXPECTED_RESPONSE_MESSAGE.toLowerCase()
+      )
+    ) {
+      return { ok: false, error: DownloadError.HosterUnlockUnavailable };
     }
   }
 

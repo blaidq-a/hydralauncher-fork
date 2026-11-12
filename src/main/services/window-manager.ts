@@ -10,6 +10,7 @@ import {
   AuthPage,
   CUSTOM_WINDOW_BORDER_WIDTH,
   CUSTOM_WINDOW_TITLE_BAR_HEIGHT,
+  MAIN_WINDOW_TITLE_BAR_HEIGHT,
   NATIVE_WINDOW_DECORATIONS_ARGUMENT,
 } from "@shared";
 import type {
@@ -157,7 +158,8 @@ export class WindowManager {
       minWidth: WindowManager.MIN_WINDOW_WIDTH,
       minHeight: WindowManager.MIN_WINDOW_HEIGHT,
       icon: windowIconAsset,
-      trafficLightPosition: { x: 16, y: 16 },
+      // Centers the traffic lights in the title bar.
+      trafficLightPosition: { x: 16, y: 13 },
       show: false,
     };
 
@@ -185,7 +187,7 @@ export class WindowManager {
         titleBarOverlay: {
           symbolColor: "#DADBE1",
           color: "#00000000",
-          height: 34,
+          height: MAIN_WINDOW_TITLE_BAR_HEIGHT,
         },
       };
     }

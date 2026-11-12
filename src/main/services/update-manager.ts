@@ -22,7 +22,7 @@ const UPSTREAM_REPOSITORY = "hydralauncher/hydra";
  * every upstream merge; the fork's own version (package.json) is independent
  * so fork-only releases can be published between upstream versions.
  */
-export const UPSTREAM_BASE_VERSION = "4.4.0";
+export const UPSTREAM_BASE_VERSION = "4.4.1";
 
 const CHECK_INTERVAL_MS = 60 * 60 * 1000;
 const MIN_CHECK_GAP_MS = 60 * 1000;
