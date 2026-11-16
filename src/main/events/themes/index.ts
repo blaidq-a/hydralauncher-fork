@@ -9,6 +9,7 @@ import "./get-custom-theme-by-id";
 import "./get-theme-sound-data-url";
 import "./get-theme-sound-path";
 import "./import-theme-sound-from-store";
+import "./install-bundled-themes";
 import "./open-editor-window";
 import "./remove-theme-achievement-sound";
 import "./toggle-custom-theme";

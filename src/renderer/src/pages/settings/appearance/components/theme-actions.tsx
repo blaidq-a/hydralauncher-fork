@@ -1,10 +1,17 @@
-import { GlobeIcon, TrashIcon, PlusIcon } from "@primer/octicons-react";
+import {
+  GlobeIcon,
+  TrashIcon,
+  PlusIcon,
+  PackageIcon,
+} from "@primer/octicons-react";
 import { Button } from "@renderer/components/button/button";
 import { useTranslation } from "react-i18next";
 import { AddThemeModal, DeleteAllThemesModal } from "../index";
 import "./theme-actions.scss";
 import { useState } from "react";
 import { THEME_WEB_STORE_URL } from "@renderer/constants";
+import { useToast } from "@renderer/hooks";
+import { logger } from "@renderer/logger";
 
 interface ThemeActionsProps {
   onListUpdated: () => void;
@@ -20,6 +27,24 @@ export const ThemeActions = ({
   const [addThemeModalVisible, setAddThemeModalVisible] = useState(false);
   const [deleteAllThemesModalVisible, setDeleteAllThemesModalVisible] =
     useState(false);
+
+  // Fork: one-click install of the bundled theme pack
+  const { showSuccessToast, showErrorToast } = useToast();
+  const [installingPack, setInstallingPack] = useState(false);
+
+  const installThemePack = async () => {
+    setInstallingPack(true);
+    try {
+      const count = await window.electron.installBundledThemes();
+      showSuccessToast(t("theme_pack_installed", { count }));
+      onListUpdated();
+    } catch (error) {
+      logger.error("Failed to install the bundled themes", error);
+      showErrorToast(t("theme_pack_failed"));
+    } finally {
+      setInstallingPack(false);
+    }
+  };
 
   return (
     <>
@@ -60,6 +85,16 @@ export const ThemeActions = ({
         </div>
 
         <div className="settings-appearance__actions-right">
+          <Button
+            theme="outline"
+            className="settings-appearance__button"
+            onClick={installThemePack}
+            disabled={installingPack}
+          >
+            <PackageIcon />
+            {t("install_theme_pack")}
+          </Button>
+
           <Button
             theme="outline"
             className="settings-appearance__button"

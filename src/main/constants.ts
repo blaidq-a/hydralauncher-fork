@@ -49,6 +49,11 @@ export const achievementSoundPath = app.isPackaged
   ? path.join(process.resourcesPath, "achievement.wav")
   : path.join(__dirname, "..", "..", "resources", "achievement.wav");
 
+// Fork: blaidq's theme pack, installed from Settings > Appearance
+export const bundledThemesPath = app.isPackaged
+  ? path.join(process.resourcesPath, "themes")
+  : path.join(__dirname, "..", "..", "resources", "themes");
+
 export const chatMessageSoundPath = app.isPackaged
   ? path.join(process.resourcesPath, "chat-message.wav")
   : path.join(

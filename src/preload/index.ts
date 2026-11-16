@@ -2332,6 +2332,8 @@ contextBridge.exposeInMainWorld("electron", {
   addCustomTheme: (theme: Theme) => ipcRenderer.invoke("addCustomTheme", theme),
   getAllCustomThemes: () => ipcRenderer.invoke("getAllCustomThemes"),
   deleteAllCustomThemes: () => ipcRenderer.invoke("deleteAllCustomThemes"),
+  /* Fork: one-click install of the bundled theme pack */
+  installBundledThemes: () => ipcRenderer.invoke("installBundledThemes"),
   deleteCustomTheme: (themeId: string) =>
     ipcRenderer.invoke("deleteCustomTheme", themeId),
   updateCustomTheme: (themeId: string, code: string) =>

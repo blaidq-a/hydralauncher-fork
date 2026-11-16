@@ -1598,6 +1598,8 @@ declare global {
     addCustomTheme: (theme: Theme) => Promise<void>;
     getAllCustomThemes: () => Promise<Theme[]>;
     deleteAllCustomThemes: () => Promise<void>;
+    /* Fork */
+    installBundledThemes: () => Promise<number>;
     deleteCustomTheme: (themeId: string) => Promise<void>;
     updateCustomTheme: (themeId: string, code: string) => Promise<void>;
     getCustomThemeById: (themeId: string) => Promise<Theme | null>;
